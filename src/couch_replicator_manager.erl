@@ -868,13 +868,14 @@ scan_all_dbs(Server) when is_pid(Server) ->
     couch_db:close(Db).
 
 is_replicator_db_fun() ->
-    {ok, RegExp} = re:compile("^([a-z][a-z0-9\\_\\$()\\+\\-\\/]*/)?_replicator$"),
-    fun
-        (<<"shards/", _/binary>>=DbName) ->
-            match =:= re:run(mem3:dbname(DbName), RegExp, [{capture,none}]);
-        (DbName) ->
-            LocalRepDb = ?l2b(config:get("replicator", "db", "_replicator")),
-            DbName == LocalRepDb
+    fun(Name) ->
+        DbName = mem3:dbname(Name),
+        case lists:last(binary:split(DbName, <<"/">>, [global])) of
+            <<"_replicator">> ->
+                true;
+            _ ->
+                false
+        end
     end.
 
 get_json_value(Key, Props) ->
