@@ -340,12 +340,11 @@ has_valid_rep_id(_Else) ->
 
 db_update_notifier() ->
     Server = self(),
-    IsReplicatorDbFun = is_replicator_db_fun(),
     {ok, Notifier} = couch_db_update_notifier:start_link(fun
         ({Event, ShardDbName})
                 when Event == created; Event == updated; Event == deleted ->
             DbName = mem3:dbname(ShardDbName),
-            IsRepDb = IsReplicatorDbFun(DbName),
+            IsRepDb = is_replicator_db(DbName),
             case Event of
                 created when IsRepDb ->
                     ensure_rep_ddoc_exists(DbName);
@@ -846,7 +845,6 @@ strip_credentials({Props}) ->
 scan_all_dbs(Server) when is_pid(Server) ->
     {ok, Db} = mem3_util:ensure_exists(config:get("mem3", "shard_db", "dbs")),
     ChangesFun = couch_changes:handle_changes(#changes_args{}, nil, Db),
-    IsReplicatorDbFun = is_replicator_db_fun(),
     ChangesFun(fun({change, {Change}, _}, _) ->
         DbName = get_json_value(<<"id">>, Change),
         case DbName of <<"_design/", _/binary>> -> ok; _Else ->
@@ -854,7 +852,7 @@ scan_all_dbs(Server) when is_pid(Server) ->
             true ->
                 ok;
             false ->
-                case IsReplicatorDbFun(DbName) of
+                case is_replicator_db(DbName) of
                     true ->
                         ensure_rep_ddoc_exists(DbName),
                         gen_server:call(Server, {resume_scan, DbName});
@@ -867,15 +865,13 @@ scan_all_dbs(Server) when is_pid(Server) ->
     end),
     couch_db:close(Db).
 
-is_replicator_db_fun() ->
-    fun(Name) ->
-        DbName = mem3:dbname(Name),
-        case lists:last(binary:split(DbName, <<"/">>, [global])) of
-            <<"_replicator">> ->
-                true;
-            _ ->
-                false
-        end
+is_replicator_db(Name) ->
+    DbName = mem3:dbname(Name),
+    case lists:last(binary:split(DbName, <<"/">>, [global])) of
+        <<"_replicator">> ->
+            true;
+        _ ->
+            false
     end.
 
 get_json_value(Key, Props) ->
