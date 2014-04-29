@@ -240,8 +240,8 @@ open_doc_revs(#httpdb{} = HttpDb, Id, Revs, Options, Fun, Acc) ->
             ),
             #httpdb{retries = Retries, wait = Wait0} = HttpDb,
             Wait = 2 * erlang:min(Wait0 * 2, ?MAX_WAIT),
-            couch_log:notice("Retrying GET to ~s in ~p seconds due to error ~s",
-                [Url, Wait / 1000, Else]
+            couch_log:notice("Retrying GET to ~s in ~p seconds due to error ~p",
+                [Url, Wait / 1000, error_reason(Else)]
             ),
             ok = timer:sleep(Wait),
             RetryDb = HttpDb#httpdb{
@@ -254,6 +254,14 @@ open_doc_revs(Db, Id, Revs, Options, Fun, Acc) ->
     {ok, Results} = couch_db:open_doc_revs(Db, Id, Revs, Options),
     {ok, lists:foldl(fun(R, A) -> {_, A2} = Fun(R, A), A2 end, Acc, Results)}.
 
+error_reason({http_request_failed, "GET", _Url, {error, timeout}}) ->
+    timeout;
+error_reason({http_request_failed, "GET", _Url, {error, {_, req_timedout}}}) ->
+    req_timedout;
+error_reason({http_request_failed, "GET", _Url, Error}) ->
+    Error;
+error_reason(Else) ->
+    Else.
 
 open_doc(#httpdb{} = Db, Id, Options) ->
     send_req(
@@ -297,7 +305,11 @@ update_doc(#httpdb{} = HttpDb, #doc{id = DocId} = Doc, Options, Type) ->
     end ++ [{"Content-Type", ?b2l(ContentType)}, {"Content-Length", Len}],
     Body = {fun stream_doc/1, {JsonBytes, Doc#doc.atts, Boundary, Len}},
     send_req(
-        HttpDb,
+        % A crash here bubbles all the way back up to run_user_fun inside
+        % open_doc_revs, which will retry the whole thing.  That's the
+        % appropriate course of action, since we've already started streaming
+        % the response body from the GET request.
+        HttpDb#httpdb{retries = 0},
         [{method, put}, {path, encode_doc_id(DocId)},
             {qs, QArgs}, {headers, Headers}, {body, Body}],
         fun(Code, _, {Props}) when Code =:= 200 orelse Code =:= 201 orelse Code =:= 202 ->
@@ -591,7 +603,7 @@ receive_docs(Streamer, UserFun, Ref, UserAcc) ->
                 fun() -> receive_doc_data(Streamer, Ref) end,
                 Ref) of
             {ok, Doc, WaitFun, Parser} ->
-                case UserFun({ok, Doc}, UserAcc) of
+                case run_user_fun(UserFun, {ok, Doc}, UserAcc, Ref) of
                 {ok, UserAcc2} ->
                     ok;
                 {skip, UserAcc2} ->
@@ -603,17 +615,47 @@ receive_docs(Streamer, UserFun, Ref, UserAcc) ->
         {"application/json", []} ->
             Doc = couch_doc:from_json_obj(
                     ?JSON_DECODE(receive_all(Streamer, Ref, []))),
-            {_, UserAcc2} = UserFun({ok, Doc}, UserAcc),
+            {_, UserAcc2} = run_user_fun(UserFun, {ok, Doc}, UserAcc, Ref),
             receive_docs(Streamer, UserFun, Ref, UserAcc2);
         {"application/json", [{"error","true"}]} ->
             {ErrorProps} = ?JSON_DECODE(receive_all(Streamer, Ref, [])),
             Rev = get_value(<<"missing">>, ErrorProps),
             Result = {{not_found, missing}, couch_doc:parse_rev(Rev)},
-            {_, UserAcc2} = UserFun(Result, UserAcc),
+            {_, UserAcc2} = run_user_fun(UserFun, Result, UserAcc, Ref),
             receive_docs(Streamer, UserFun, Ref, UserAcc2)
         end;
     {done, Ref} ->
         {ok, UserAcc}
+    end.
+
+
+run_user_fun(UserFun, Arg, UserAcc, OldRef) ->
+    {Pid, Ref} = spawn_monitor(fun() ->
+        try UserFun(Arg, UserAcc) of
+            Resp ->
+                exit({exit_ok, Resp})
+        catch
+            throw:Reason ->
+                exit({exit_throw, Reason});
+            error:Reason ->
+                exit({exit_error, Reason});
+            exit:Reason ->
+                exit({exit_exit, Reason})
+        end
+    end),
+    receive
+        {started_open_doc_revs, NewRef} ->
+            erlang:demonitor(Ref, [flush]),
+            exit(Pid, kill),
+            restart_remote_open_doc_revs(OldRef, NewRef);
+        {'DOWN', Ref, process, Pid, {exit_ok, Ret}} ->
+            Ret;
+        {'DOWN', Ref, process, Pid, {exit_throw, Reason}} ->
+            throw(Reason);
+        {'DOWN', Ref, process, Pid, {exit_error, Reason}} ->
+            erlang:error(Reason);
+        {'DOWN', Ref, process, Pid, {exit_exit, Reason}} ->
+            erlang:exit(Reason)
     end.
 
 
@@ -704,6 +746,7 @@ doc_from_multi_part_stream(ContentType, DataFun, Ref) ->
     {doc_bytes, Ref, DocBytes} ->
         Doc = couch_doc:from_json_obj(?JSON_DECODE(DocBytes)),
         ReadAttachmentDataFun = fun() ->
+            link(Parser),
             Parser ! {get_bytes, Ref, self()},
             receive
             {started_open_doc_revs, NewRef} ->
@@ -825,6 +868,12 @@ rev_to_str({_Pos, _Id} = Rev) ->
 rev_to_str(Rev) ->
     Rev.
 
+write_fun() ->
+    fun(Data) ->
+        receive {get_data, Ref, From} ->
+            From ! {data, Ref, Data}
+        end
+    end.
 
 stream_doc({JsonBytes, Atts, Boundary, Len}) ->
     case erlang:erase({doc_streamer, Boundary}) of
@@ -834,17 +883,11 @@ stream_doc({JsonBytes, Atts, Boundary, Len}) ->
     _ ->
         ok
     end,
-    Self = self(),
-    DocStreamer = spawn_link(fun() ->
-        couch_doc:doc_to_multi_part_stream(
-            Boundary, JsonBytes, Atts,
-            fun(Data) ->
-                receive {get_data, Ref, From} ->
-                    From ! {data, Ref, Data}
-                end
-            end, true),
-        unlink(Self)
-    end),
+    DocStreamer = spawn_link(
+        couch_doc,
+        doc_to_multi_part_stream,
+        [Boundary, JsonBytes, Atts, write_fun(), true]
+    ),
     erlang:put({doc_streamer, Boundary}, DocStreamer),
     {ok, <<>>, {Len, Boundary}};
 stream_doc({0, Id}) ->

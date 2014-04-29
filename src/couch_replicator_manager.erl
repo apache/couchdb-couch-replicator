@@ -832,6 +832,9 @@ Body)),
         end
     end.
 
+
+strip_credentials(undefined) ->
+    undefined;
 strip_credentials(Url) when is_binary(Url) ->
     re:replace(Url,
         "http(s)?://(?:[^:]+):[^@]+@(.*)$",
