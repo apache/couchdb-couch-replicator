@@ -665,12 +665,13 @@ save_rep_doc(DbName, Doc) ->
 
 defer_call(Fun) ->
     {Pid, Ref} = erlang:spawn_monitor(fun() ->
-        try
-            exit({exit_ok, Fun()})
+        Res = try
+            Fun()
         catch
             Type:Reason ->
                 exit({exit_err, Type, Reason})
-        end
+        end,
+        exit({exit_ok, Res})
     end),
     receive
         {'DOWN', Ref, process, Pid, {exit_ok, Resp}} ->
