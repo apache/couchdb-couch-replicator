@@ -729,44 +729,6 @@ receive_doc_data(Streamer, Ref) ->
         {<<>>, fun() -> receive_doc_data(Streamer, Ref) end}
     end.
 
-doc_from_multi_part_stream(ContentType, DataFun, Ref) ->
-    Self = self(),
-    Parser = spawn_link(fun() ->
-        {<<"--">>, _, _} = couch_httpd:parse_multipart_request(
-            ContentType, DataFun,
-            fun(Next) -> couch_replicator_utils:mp_parse_doc(Next, []) end),
-        unlink(Self)
-        end),
-    Parser ! {get_doc_bytes, Ref, self()},
-    receive
-    {started_open_doc_revs, NewRef} ->
-        unlink(Parser),
-        exit(Parser, kill),
-        restart_remote_open_doc_revs(Ref, NewRef);
-    {doc_bytes, Ref, DocBytes} ->
-        Doc = couch_doc:from_json_obj(?JSON_DECODE(DocBytes)),
-        ReadAttachmentDataFun = fun() ->
-            link(Parser),
-            Parser ! {get_bytes, Ref, self()},
-            receive
-            {started_open_doc_revs, NewRef} ->
-                unlink(Parser),
-                exit(Parser, kill),
-                receive {bytes, Ref, _} -> ok after 0 -> ok end,
-                restart_remote_open_doc_revs(Ref, NewRef);
-            {bytes, Ref, Bytes} ->
-                Bytes
-            end
-        end,
-        Atts2 = lists:map(
-            fun(#att{data = follows} = A) ->
-                A#att{data = ReadAttachmentDataFun};
-            (A) ->
-                A
-            end, Doc#doc.atts),
-        {ok, Doc#doc{atts = Atts2}, Parser}
-    end.
-
 
 changes_ev1(object_start, UserFun, UserAcc) ->
     fun(Ev) -> changes_ev2(Ev, UserFun, UserAcc) end.
