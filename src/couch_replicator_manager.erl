@@ -502,12 +502,12 @@ maybe_start_replication(State, DbName, DocId, RepDoc) ->
     #rep_state{starting = false, rep = #rep{db_name = DbName, doc_id = OtherDocId}} ->
         couch_log:notice("The replication specified by the document `~s` was already"
             " triggered by the document `~s`", [DocId, OtherDocId]),
-        maybe_tag_rep_doc(DbName, DocId, RepDoc, ?l2b(BaseId)),
+        stop_duplicate(DbName, DocId, RepDoc, ?l2b(BaseId)),
         State;
     #rep_state{starting = true, rep = #rep{db_name = DbName, doc_id = OtherDocId}} ->
         couch_log:notice("The replication specified by the document `~s` is already"
             " being triggered by the document `~s`", [DocId, OtherDocId]),
-        maybe_tag_rep_doc(DbName, DocId, RepDoc, ?l2b(BaseId)),
+        stop_duplicate(DbName, DocId, RepDoc, ?l2b(BaseId)),
         State
     end.
 
@@ -524,13 +524,12 @@ parse_rep_doc(RepDoc) ->
     Rep.
 
 
-maybe_tag_rep_doc(DbName, DocId, {RepProps}, RepId) ->
-    case get_json_value(<<"_replication_id">>, RepProps) of
-    RepId ->
-        ok;
-    _ ->
-        update_rep_doc(DbName, DocId, [{<<"_replication_id">>, RepId}])
-    end.
+stop_duplicate(DbName, DocId, {RepProps}, RepId) ->
+    update_rep_doc(DbName, DocId, [
+        {<<"_replication_id">>, RepId},
+        {<<"_replication_state">>, <<"completed">>},
+        {<<"_replication_state_reason">>, <<"duplicate">>}
+    ]).
 
 start_replication(Rep, Wait) ->
     ok = timer:sleep(Wait * 1000),
