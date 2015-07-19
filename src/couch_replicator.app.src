@@ -26,7 +26,8 @@
         couch_replicator_httpc_pool,
         couch_replicator_sup,
         couch_replicator_utils,
-        couch_replicator_worker
+        couch_replicator_worker,
+        couch_replicator_dbs
     ]},
     {registered, [
         couch_replicator,
