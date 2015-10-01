@@ -165,7 +165,7 @@ loop(Parent, Ref, Worker, Pool) ->
 
 spawn_pool() ->
     Host = config:get("httpd", "bind_address", "127.0.0.1"),
-    Port = config:get("httpd", "port", "5984"),
+    Port = integer_to_list(mochiweb_socket_server:get(chttpd, port)),
     {ok, Pool} = couch_replicator_httpc_pool:start_link(
         "http://" ++ Host ++ ":" ++ Port, [{max_connections, 3}]),
     Pool.
