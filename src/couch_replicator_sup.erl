@@ -32,6 +32,12 @@ init(_Args) ->
             brutal_kill,
             worker,
             [couch_replicator_manager]},
+        {couch_replicator_rate_limiter,
+            {couch_replicator_rate_limiter, start_link, []},
+            permanent,
+            brutal_kill, % Need to think about if this should be brutal_kill
+            worker,
+            [couch_replicator_rate_limiter]},
         {couch_replicator_job_sup,
             {couch_replicator_job_sup, start_link, []},
             permanent,

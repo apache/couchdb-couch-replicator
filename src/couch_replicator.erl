@@ -256,6 +256,17 @@ init(InitArgs) ->
 do_init(#rep{options = Options, id = {BaseId, Ext}, user_ctx=UserCtx} = Rep) ->
     process_flag(trap_exit, true),
 
+    SrcLimit = get_value(src_rate_limit, Options),
+    SrcPeriod = get_value(src_rate_period, Options),
+    TargetLimit = get_value(target_rate_limit, Options),
+    TargetPeriod = get_value(target_rate_period, Options),
+    % We possibly start our rate limiter before init_state because
+    % db_open also uses a send_req
+    couch_replicator_rate_limiter:maybe_start_rate_limiter(Rep#rep.source,
+        SrcLimit, SrcPeriod),
+    couch_replicator_rate_limiter:maybe_start_rate_limiter(Rep#rep.target,
+        TargetLimit, TargetPeriod),
+
     #rep_state{
         source = Source,
         target = Target,
@@ -269,6 +280,7 @@ do_init(#rep{options = Options, id = {BaseId, Ext}, user_ctx=UserCtx} = Rep) ->
 
     NumWorkers = get_value(worker_processes, Options),
     BatchSize = get_value(worker_batch_size, Options),
+
     {ok, ChangesQueue} = couch_work_queue:new([
         {max_items, BatchSize * NumWorkers * 2},
         {max_size, 100 * 1024 * NumWorkers}
