@@ -261,6 +261,10 @@ make_options(Props) ->
     DefRetries = config:get("replicator", "retries_per_request", "10"),
     UseCheckpoints = config:get("replicator", "use_checkpoints", "true"),
     DefCheckpointInterval = config:get("replicator", "checkpoint_interval", "30000"),
+    DefSrcLimit = config:get("replicator", "src_rate_limit", "-1"),
+    DefSrcPeriod = config:get("replicator", "src_rate_period", "-1"),
+    DefTrgLimit = config:get("replicator", "target_rate_limit", "-1"),
+    DefTrgPeriod = config:get("replicator", "target_rate_period", "-1"),
     {ok, DefSocketOptions} = couch_util:parse_term(
         config:get("replicator", "socket_options",
             "[{keepalive, true}, {nodelay, false}]")),
@@ -272,7 +276,11 @@ make_options(Props) ->
         {worker_batch_size, list_to_integer(DefBatchSize)},
         {worker_processes, list_to_integer(DefWorkers)},
         {use_checkpoints, list_to_existing_atom(UseCheckpoints)},
-        {checkpoint_interval, list_to_integer(DefCheckpointInterval)}
+        {checkpoint_interval, list_to_integer(DefCheckpointInterval)},
+        {src_rate_limit, list_to_integer(DefSrcLimit)},
+        {src_rate_period, list_to_integer(DefSrcPeriod)},
+        {target_rate_limit, list_to_integer(DefTrgLimit)},
+        {target_rate_period, list_to_integer(DefTrgPeriod)}
     ])).
 
 
@@ -324,6 +332,14 @@ convert_options([{<<"use_checkpoints">>, V} | R]) ->
     [{use_checkpoints, V} | convert_options(R)];
 convert_options([{<<"checkpoint_interval">>, V} | R]) ->
     [{checkpoint_interval, couch_util:to_integer(V)} | convert_options(R)];
+convert_options([{<<"src_rate_limit">>, V} | R]) ->
+    [{src_rate_limit, couch_util:to_integer(V)} | convert_options(R)];
+convert_options([{<<"src_rate_period">>, V} | R]) ->
+    [{src_rate_period, couch_util:to_integer(V)} | convert_options(R)];
+convert_options([{<<"target_rate_limit">>, V} | R]) ->
+    [{target_rate_limit, couch_util:to_integer(V)} | convert_options(R)];
+convert_options([{<<"target_rate_period">>, V} | R]) ->
+    [{target_rate_period, couch_util:to_integer(V)} | convert_options(R)];
 convert_options([_ | R]) -> % skip unknown option
     convert_options(R).
 

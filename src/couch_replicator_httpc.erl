@@ -45,13 +45,14 @@ setup(#httpdb{httpc_pool = nil, url = Url, http_connections = MaxConns} = Db) ->
     {ok, Db#httpdb{httpc_pool = Pid}}.
 
 
-send_req(HttpDb, Params1, Callback) ->
+send_req(#httpdb{url = Url} = HttpDb, Params1, Callback) ->
     put(?STREAM_STATUS, init),
     couch_stats:increment_counter([couch_replicator, requests]),
     Params2 = ?replace(Params1, qs,
         [{K, ?b2l(iolist_to_binary(V))} || {K, V} <- get_value(qs, Params1, [])]),
     Params = ?replace(Params2, ibrowse_options,
         lists:keysort(1, get_value(ibrowse_options, Params2, []))),
+    couch_replicator_rate_limiter:maybe_delay_request(Url),
     {Worker, Response} = send_ibrowse_req(HttpDb, Params),
     Ret = try
         process_response(Response, Worker, HttpDb, Params, Callback)

@@ -136,9 +136,11 @@ db_open(DbName, Options, Create) ->
         throw({unauthorized, DbName})
     end.
 
-db_close(#httpdb{httpc_pool = Pool}) ->
+db_close(#httpdb{httpc_pool = Pool, url = Url}) ->
     unlink(Pool),
-    ok = couch_replicator_httpc_pool:stop(Pool);
+    ok = couch_replicator_httpc_pool:stop(Pool),
+    couch_replicator_rate_limiter:maybe_decrement_rep_count(Url),
+    ok;
 db_close(DbName) ->
     catch couch_db:close(DbName).
 
