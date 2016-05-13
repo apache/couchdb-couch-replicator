@@ -91,7 +91,7 @@ start_link(#rep{id = {BaseId, Ext}, source = Src, target = Tgt} = Rep) ->
                              [RepChildId, Pid, Source, Target]),
             {ok, Pid};
         {error, Reason} ->
-            couch_log:warn("failed to start replication `~s` (`~s` -> `~s`)",
+            couch_log:warning("failed to start replication `~s` (`~s` -> `~s`)",
                            [RepChildId, Source, Target]),
             {error, Reason}
     end.

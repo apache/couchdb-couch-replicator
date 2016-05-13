@@ -93,7 +93,7 @@ handle_call({change, DbName, Change}, _From,
     case {SkipDDocs, is_design_doc(Change)} of
         {true, true} ->
             {reply, ok, State};
-        {false, _} ->
+        {_, _} ->
             {reply, ok, State#state{ctx=Mod:db_change(DbName, Change, Ctx)}}
     end;
 
@@ -220,7 +220,7 @@ start_event_listener(DbSuffix) ->
     Pid.
 
 handle_db_event(DbName, created, {Server, DbSuffix}) ->
-    case suffix_match(DbName, DbSuffix) of
+    case DbSuffix =:= couch_db:dbname_suffix(DbName) of
 	true ->
 	    ok = gen_server:call(Server, {created, DbName});
 	_ ->
@@ -229,7 +229,7 @@ handle_db_event(DbName, created, {Server, DbSuffix}) ->
     {ok, {Server, DbSuffix}};
 
 handle_db_event(DbName, deleted, {Server, DbSuffix}) ->
-    case suffix_match(DbName, DbSuffix) of
+    case DbSuffix =:= couch_db:dbname_suffix(DbName) of
         true ->
             ok = gen_server:call(Server, {deleted, DbName});
         _ ->
@@ -238,7 +238,7 @@ handle_db_event(DbName, deleted, {Server, DbSuffix}) ->
     {ok, {Server, DbSuffix}};
 
 handle_db_event(DbName, updated, {Server, DbSuffix}) ->
-    case suffix_match(DbName, DbSuffix) of
+    case DbSuffix =:= couch_db:dbname_suffix(DbName) of
         true ->
 	    ok = gen_server:cast(Server, {resume_scan, DbName});
         _ ->
@@ -268,19 +268,11 @@ scan_all_dbs(Server, DbSuffix) when is_pid(Server) ->
 	end, ok).
 
 
-suffix_match(DbName, DbSuffix) ->
-    case lists:last(binary:split(mem3:dbname(DbName), <<"/">>, [global])) of
-        DbSuffix ->
-            true;
-        _ ->
-            false
-    end.
-
 is_design_doc({Change}) ->
     case lists:keyfind(<<"id">>, 1, Change) of
         false ->
             false;
-        {Id, _} ->
+        {_, Id} ->
             is_design_doc_id(Id)
     end.
 
