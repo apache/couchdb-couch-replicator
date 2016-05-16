@@ -31,7 +31,8 @@
 
 -record(state, {
     last_change :: erlang:timestamp(),
-    quiet_period = ?DEFAULT_QUIET_PERIOD :: non_neg_integer()
+    quiet_period = ?DEFAULT_QUIET_PERIOD :: non_neg_integer(),
+    timer :: timer:tref()
 }).
 
 
@@ -50,7 +51,7 @@ start_link() ->
 % been changing recently. Recency is a configuration parameter.
 %
 -spec owner(Dbname :: binary(), DocId :: binary() | null) ->
-    {ok, node()} | {error, no_owner} | {error, unstable}.
+    {ok, node()} | {ok, no_owner} | {error, unstable}.
 owner(_DbName, null) ->
     {ok, no_owner};
 owner(<<"shards/", _/binary>> = DbName, DocId) ->
@@ -92,19 +93,18 @@ owner(Key) ->
 init([]) ->
     net_kernel:monitor_nodes(true),
     ok = config:listen_for_changes(?MODULE, self()),
-    couch_log:debug("Initialized clustering gen_server ~w",[self()]),
-    {ok, #state{last_change = os:timestamp()}}.
+    Interval = config:get_integer("replicator", "cluster_quiet_period", 
+        ?DEFAULT_QUIET_PERIOD),
+    couch_log:debug("Initialized clustering gen_server ~w", [self()]),
+    {ok, #state{
+        last_change = os:timestamp(),
+        quiet_period = Interval,
+        timer = new_timer(Interval)
+    }}.
 
 
 handle_call(is_stable, _From, State) ->
-    % os:timestamp() results are not guaranteed to be monotonic
-    Sec = case timer:now_diff(os:timestamp(), State#state.last_change) of
-              USec when USec < 0 ->
-                  0;
-              USec when USec >= 0 ->
-                  USec / 1000000
-          end,
-    {reply, Sec > State#state.quiet_period, State}.
+    {reply, is_stable(State), State}.
 
 
 handle_cast({set_quiet_period, QuietPeriod}, State) when
@@ -113,11 +113,25 @@ handle_cast({set_quiet_period, QuietPeriod}, State) when
 
 
 handle_info({nodeup, _Node}, State) ->
-    {noreply, State#state{last_change = os:timestamp()}};
+    Ts = os:timestamp(),
+    Timer = new_timer(State#state.quiet_period),
+    {noreply, State#state{last_change = Ts, timer = Timer}};
 
 handle_info({nodedown, _Node}, State) ->
-    {noreply, State#state{last_change = os:timestamp()}}.
+    Ts = os:timestamp(),
+    Timer = new_timer(State#state.quiet_period),
+    {noreply, State#state{last_change = Ts, timer = Timer}};
 
+handle_info(rescan_check, State) ->
+   timer:cancel(State#state.timer),
+   case is_stable(State) of
+       true ->
+	   trigger_rescan(),
+           {noreply, State};
+       false ->
+	   Timer = new_timer(State#state.quiet_period),
+	   {noreply, State#state{timer = Timer}}
+   end.
 
 code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
@@ -128,6 +142,25 @@ terminate(_Reason, _State) ->
 
 
 %% Internal functions
+
+new_timer(Interval) ->
+    {ok, Timer} = timer:send_after(Interval, rescan_check),
+    Timer.
+
+trigger_rescan() ->
+    couch_log:notice("Triggering replicator rescan from ~p", [?MODULE]),
+    couch_replicator_manager_sup:restart_mdb_listener(),
+    ok.
+
+is_stable(State) ->
+    % os:timestamp() results are not guaranteed to be monotonic
+    Sec = case timer:now_diff(os:timestamp(), State#state.last_change) of
+        USec when USec < 0 ->
+            0;
+        USec when USec >= 0 ->
+             USec / 1000000
+    end,
+    Sec > State#state.quiet_period.
 
 
 handle_config_change("replicator", "cluster_quiet_period", V, _, S) ->

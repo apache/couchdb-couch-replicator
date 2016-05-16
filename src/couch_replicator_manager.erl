@@ -50,13 +50,32 @@
 
 
 -record(state, {
-    mdb_listener = nil,
-    rep_start_pids = [],
-    live = []
+    rep_start_pids = []
 }).
 
 start_link() ->
     gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
+
+
+
+%%%%%% Multidb changes callbacks
+
+db_created(DbName, Server) ->
+    couch_replicator_docs:ensure_rep_ddoc_exists(DbName),
+    Server.
+
+db_deleted(DbName, Server) ->
+    clean_up_replications(DbName),
+    Server.
+
+db_found(DbName, Server) ->
+    couch_replicator_docs:ensure_rep_ddoc_exists(DbName),
+    Server.
+
+db_change(DbName, Change, Server) ->
+    ok = gen_server:call(Server, {rep_db_update, DbName, Change}, infinity),
+    Server.
+
 
 
 replication_started(#rep{id = RepId}) ->
@@ -101,7 +120,7 @@ replication_error(#rep{id = RepId}, Error) ->
     nil ->
         ok;
     #rep{db_name = DbName, doc_id = DocId} ->
-        % NV: TODO: We might want to do something else instead of update doc on every error
+        % NV: TODO: later, perhaps don't update doc on each error
          couch_replicator_docs:update_doc_error(DbName, DocId, RepId, Error),
         ok = gen_server:call(?MODULE, {rep_error, RepId, Error}, infinity)
     end.
@@ -110,28 +129,28 @@ replication_error(#rep{id = RepId}, Error) ->
 continue(#rep{doc_id = null}) ->
     {true, no_owner};
 continue(#rep{id = RepId}) ->
-    Owner = gen_server:call(?MODULE, {owner, RepId}, infinity),
-    {node() == Owner, Owner}.
+    case rep_state(RepId) of
+    nil ->
+        {false, nonode};
+    #rep{db_name = DbName, doc_id = DocId} ->
+	case couch_replicator_clustering:owner(DbName, DocId) of
+        {ok, no_owner} ->
+	    {true, no_owner};
+	{ok, Owner} ->
+	    {node() == Owner, Owner};
+	{error, unstable} ->
+	    {true, unstable}
+        end
+    end.
 
 
 init(_) ->
     process_flag(trap_exit, true),
-    net_kernel:monitor_nodes(true),
-    Live = [node() | nodes()],
     ?DOC_TO_REP = ets:new(?DOC_TO_REP, [named_table, set, public]),
     ?REP_TO_STATE = ets:new(?REP_TO_STATE, [named_table, set, public]),
     couch_replicator_docs:ensure_rep_db_exists(),
-    {ok, #state{mdb_listener = start_mdb_listener(), live = Live}}.
+    {ok, #state{}}.
 
-% NV: TODO: Use new cluster membership module here. Possible return value
-% could be 'unstable' in which case should keep old owner + possibly logging.
-handle_call({owner, RepId}, _From, State) ->
-    case rep_state(RepId) of
-    nil ->
-        {reply, nonode, State};
-    #rep{db_name = DbName, doc_id = DocId} ->
-        {reply, owner(DbName, DocId, State#state.live), State}
-    end;
 
 handle_call({rep_db_update, DbName, {ChangeProps} = Change}, _From, State) ->
     NewState = try
@@ -163,22 +182,6 @@ handle_cast(Msg, State) ->
     couch_log:error("Replication manager received unexpected cast ~p", [Msg]),
     {stop, {error, {unexpected_cast, Msg}}, State}.
 
-% NV: TODO: Remove when switching to new cluster membership module
-handle_info({nodeup, Node}, State) ->
-    couch_log:notice("Rescanning replicator dbs as ~s came up.", [Node]),
-    Live = lists:usort([Node | State#state.live]),
-    {noreply, rescan(State#state{live=Live})};
-
-% NV: TODO: Remove when switching to new cluster membership module
-handle_info({nodedown, Node}, State) ->
-    couch_log:notice("Rescanning replicator dbs ~s went down.", [Node]),
-    Live = State#state.live -- [Node],
-    {noreply, rescan(State#state{live=Live})};
-
-handle_info({'EXIT', From, Reason}, #state{mdb_listener = From} = State) ->
-    couch_log:error("Database update notifier died. Reason: ~p", [Reason]),
-    {stop, {db_update_notifier_died, Reason}, State};
-
 handle_info({'EXIT', From, Reason}, #state{rep_start_pids = Pids} = State) ->
     case lists:keytake(From, 2, Pids) of
         {value, {rep_start, From}, NewPids} ->
@@ -207,11 +210,7 @@ handle_info(Msg, State) ->
     {stop, {unexpected_msg, Msg}, State}.
 
 
-terminate(_Reason, State) ->
-    #state{
-        rep_start_pids = StartPids,
-        mdb_listener = Listener
-    } = State,
+terminate(_Reason, #state{rep_start_pids = StartPids}) ->
     stop_all_replications(),
     lists:foreach(
         fun({_Tag, Pid}) ->
@@ -220,63 +219,28 @@ terminate(_Reason, State) ->
         end,
         StartPids),
     true = ets:delete(?REP_TO_STATE),
-    true = ets:delete(?DOC_TO_REP),
-    catch unlink(Listener),
-    catch exit(Listener).
+    true = ets:delete(?DOC_TO_REP).
 
 
 code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
 
 
-start_mdb_listener() ->
-    {ok, Pid} = couch_multidb_changes:start_link(
-        <<"_replicator">>, ?MODULE, self(), [skip_ddocs]),
-    Pid.
-
-
-%%%%%% multidb changes callbacks
-
-db_created(DbName, Server) ->
-    couch_replicator_docs:ensure_rep_ddoc_exists(DbName),
-    Server.
-
-db_deleted(DbName, Server) ->
-    clean_up_replications(DbName),
-    Server.
-
-db_found(DbName, Server) ->
-    couch_replicator_docs:ensure_rep_ddoc_exists(DbName),
-    Server.
-
-db_change(DbName, Change, Server) ->
-    ok = gen_server:call(Server, {rep_db_update, DbName, Change}, infinity),
-    Server.
-
-
-% NV: TODO: This will change when using the new clustering module.
-% Rescan should happend when cluster membership changes, clustering module
-% handles with an appropriate back-off. mdb_listener should probably live
-% in a supervisor and that supervisor should be asked to restart it.
-rescan(#state{mdb_listener = nil} = State) ->
-    State#state{mdb_listener = start_mdb_listener()};
-rescan(#state{mdb_listener = MPid} = State) ->
-    unlink(MPid),
-    exit(MPid, exit),
-    rescan(State#state{mdb_listener = nil}).
-
-
 process_update(State, DbName, {Change}) ->
     {RepProps} = JsonRepDoc = get_json_value(doc, Change),
     DocId = get_json_value(<<"_id">>, RepProps),
-    case {owner(DbName, DocId, State#state.live), get_json_value(deleted, Change, false)} of
+    Owner = couch_replicator_clustering:owner(DbName, DocId),
+    case {Owner, get_json_value(deleted, Change, false)} of
     {_, true} ->
         rep_doc_deleted(DbName, DocId),
         State;
-    {Owner, false} when Owner /= node() ->
+    {{ok, Owner}, false} when Owner /= node() ->
         couch_log:notice("Not starting '~s' as owner is ~s.", [DocId, Owner]),
         State;
-    {_Owner, false} ->
+    {{error, unstable}, false} ->
+	couch_log:notice("Not starting '~s' as cluster is unstable", [DocId]),
+	State;
+    {{ok,_Owner}, false} ->
         couch_log:notice("Maybe starting '~s' as I'm the owner", [DocId]),
         case get_json_value(<<"_replication_state">>, RepProps) of
         undefined ->
@@ -295,15 +259,6 @@ process_update(State, DbName, {Change}) ->
             end
         end
     end.
-
-
-owner(<<"shards/", _/binary>> = DbName, DocId, Live) ->
-    Nodes = lists:sort([N || #shard{node=N} <- mem3:shards(mem3:dbname(DbName), DocId),
-			     lists:member(N, Live)]),
-    hd(mem3_util:rotate_list({DbName, DocId}, Nodes));
-owner(_DbName, _DocId, _Live) ->
-    node().
-
 
 
 maybe_start_replication(State, DbName, DocId, RepDoc) ->
@@ -343,7 +298,7 @@ start_replication(Rep) ->
     % temporarily add some random sleep here. To avoid repeated failed restarts in
     % a loop if source doc is broken
     timer:sleep(random:uniform(1000)),
-    case (catch couch_replicator:async_replicate(Rep)) of
+    case (catch couch_replicator_scheduler:add_job(Rep)) of
     {ok, _} ->
         ok;
     Error ->
@@ -361,7 +316,7 @@ replication_complete(DbName, DocId) ->
 rep_doc_deleted(DbName, DocId) ->
     case ets:lookup(?DOC_TO_REP, {DbName, DocId}) of
     [{{DbName, DocId}, RepId}] ->
-        couch_replicator:cancel_replication(RepId),
+        couch_replicator_scheduler:remove_job(RepId),
         true = ets:delete(?REP_TO_STATE, RepId),
         true = ets:delete(?DOC_TO_REP, {DbName, DocId}),
         couch_log:notice("Stopped replication `~s` because replication document `~s`"
@@ -395,7 +350,7 @@ stop_all_replications() ->
     couch_log:notice("Stopping all ongoing replications", []),
     ets:foldl(
         fun({_, RepId}, _) ->
-            couch_replicator:cancel_replication(RepId)
+            couch_replicator_scheduler:remove_job(RepId)
         end,
         ok, ?DOC_TO_REP),
     true = ets:delete_all_objects(?REP_TO_STATE),
@@ -405,7 +360,7 @@ stop_all_replications() ->
 clean_up_replications(DbName) ->
     ets:foldl(
         fun({{Name, DocId}, RepId}, _) when Name =:= DbName ->
-            couch_replicator:cancel_replication(RepId),
+            couch_replicator_scheduler:remove_job(RepId),
             ets:delete(?DOC_TO_REP,{Name, DocId}),
             ets:delete(?REP_TO_STATE, RepId);
            ({_,_}, _) ->
@@ -437,4 +392,4 @@ before_doc_update(Doc, Db) ->
     couch_replicator_docs:before_doc_update(Doc, Db).
 
 after_doc_read(Doc, Db) ->
-    couch_replicator_doc:after_doc_read(Doc, Db).
+    couch_replicator_docs:after_doc_read(Doc, Db).
