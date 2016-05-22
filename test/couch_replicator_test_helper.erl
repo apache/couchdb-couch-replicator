@@ -2,8 +2,9 @@
 
 -include_lib("couch/include/couch_eunit.hrl").
 -include_lib("couch/include/couch_db.hrl").
+-include_lib("couch_replicator/src/couch_replicator.hrl").
 
--export([compare_dbs/2, db_url/1, replicate/2]).
+-export([compare_dbs/2, db_url/1, replicate/2, replicate_doc/1]).
 
 compare_dbs(Source, Target) ->
     {ok, SourceDb} = couch_db:open_int(Source, []),
@@ -93,15 +94,24 @@ db_url(DbName) ->
         "/", DbName
     ]).
 
+get_pid(RepId) ->
+    Pid = global:whereis_name({couch_replicator_scheduler_job,RepId}),
+    ?assert(is_pid(Pid)),
+    Pid.
+
 replicate(Source, Target) ->
-    RepObject = {[
+    replicate_doc({[
         {<<"source">>, Source},
         {<<"target">>, Target}
-    ]},
+    ]}).
+
+replicate_doc(RepObject) ->
     {ok, Rep} = couch_replicator_utils:parse_rep_doc(RepObject, ?ADMIN_USER),
-    {ok, Pid} = couch_replicator:async_replicate(Rep),
+    ok = couch_replicator_scheduler:add_job(Rep),
+    Pid = get_pid(Rep#rep.id),
     MonRef = erlang:monitor(process, Pid),
     receive
         {'DOWN', MonRef, process, Pid, _} ->
             ok
-    end.
+    end,
+    ok = couch_replicator_scheduler:remove_job(Rep#rep.id).

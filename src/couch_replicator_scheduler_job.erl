@@ -37,8 +37,10 @@
 
 -import(couch_replicator_utils, [
     start_db_compaction_notifier/2,
-    stop_db_compaction_notifier/1
+    stop_db_compaction_notifier/1,
+    pp_rep_id/1
 ]).
+
 
 %% definitions
 -define(LOWEST_SEQ, 0).
@@ -191,7 +193,7 @@ do_init(#rep{options = Options, id = {BaseId, Ext}, user_ctx=UserCtx} = Rep) ->
 
     couch_log:debug("Worker pids are: ~p", [Workers]),
 
-    couch_replicator_manager:replication_started(Rep),
+    doc_update_triggered(Rep),
 
     {ok, State#rep_state{
             changes_queue = ChangesQueue,
@@ -332,9 +334,9 @@ handle_cast({db_compacted, DbName},
     {noreply, State#rep_state{target = NewTarget}};
 
 handle_cast(checkpoint, State) ->
-    #rep_state{rep_details = #rep{} = Rep} = State,
-    case couch_replicator_manager:continue(Rep) of
-    {true, _} ->
+    #rep_state{rep_details = #rep{db_name = DbName, doc_id = DocId} = Rep} = State,
+    case couch_replicator_clustering:owner(DbName, DocId) of
+    Owner when Owner =:= node(); Owner =:= no_owner; Owner =:= unstable ->
         case do_checkpoint(State) of
         {ok, NewState} ->
             couch_stats:increment_counter([couch_replicator, checkpoints, success]),
@@ -343,8 +345,9 @@ handle_cast(checkpoint, State) ->
             couch_stats:increment_counter([couch_replicator, checkpoints, failure]),
             {stop, Error, State}
         end;
-    {false, Owner} ->
-        couch_replicator_manager:replication_usurped(Rep, Owner),
+    Other when Other =/= node() ->
+        couch_log:notice("Replication `~s` usurped by ~s (triggered by `~s`)",
+            [Rep#rep.id, Other, DocId]),
         {stop, shutdown, State}
     end;
 
@@ -400,7 +403,7 @@ terminate(normal, #rep_state{rep_details = #rep{id = RepId} = Rep,
     checkpoint_history = CheckpointHistory} = State) ->
     terminate_cleanup(State),
     couch_replicator_notifier:notify({finished, RepId, CheckpointHistory}),
-    couch_replicator_manager:replication_completed(Rep, rep_stats(State));
+    doc_update_completed(Rep, rep_stats(State));
 
 terminate(shutdown, #rep_state{rep_details = #rep{id = RepId}} = State) ->
     % cancelled replication throught ?MODULE:cancel_replication/1
@@ -422,7 +425,7 @@ terminate(shutdown, {error, Class, Error, Stack, InitArgs}) ->
         NotifyError = Error
     end,
     couch_replicator_notifier:notify({error, RepId, NotifyError}),
-    couch_replicator_manager:replication_error(InitArgs, NotifyError);
+    report_job_error(InitArgs, NotifyError);
 terminate(Reason, State) ->
     #rep_state{
         source_name = Source,
@@ -433,7 +436,7 @@ terminate(Reason, State) ->
         [BaseId ++ Ext, Source, Target, to_binary(Reason)]),
     terminate_cleanup(State),
     couch_replicator_notifier:notify({error, RepId, Reason}),
-    couch_replicator_manager:replication_error(Rep, Reason).
+    report_job_error(Rep, Reason).
 
 terminate_cleanup(State) ->
     update_task(State),
@@ -446,6 +449,30 @@ terminate_cleanup(State) ->
 format_status(_Opt, [_PDict, State]) ->
     [{data, [{"State", state_strip_creds(State)}]}].
 
+
+report_job_error(_Rep, _Error) ->
+    % TODO: handle errors back to job scheduler to let it
+    % decide if needed to backoff and retry and what the back-off schedule
+    % should be
+    ok.
+
+-spec doc_update_triggered(#rep{}) -> ok.
+doc_update_triggered(#rep{db_name = null}) ->
+    ok;
+doc_update_triggered(#rep{id = RepId, db_name = DbName, doc_id = DocId}) ->
+    couch_replicator_docs:update_doc_triggered(DbName, DocId, RepId),
+    couch_log:notice("Document `~s` triggered replication `~s`",
+        [DocId, pp_rep_id(RepId)]),
+    ok.
+
+-spec doc_update_completed(#rep{}, list()) -> ok.
+doc_update_completed(#rep{db_name = null}, _Stats) ->
+    ok;
+doc_update_completed(#rep{id = RepId, doc_id = DocId, db_name = DbName}, Stats) ->
+    couch_replicator_docs:update_doc_completed(DbName, DocId, Stats),
+    couch_log:notice("Replication `~s` completed (triggered by `~s`)",
+        [pp_rep_id(RepId), DocId]),
+    ok.
 
 do_last_checkpoint(#rep_state{seqs_in_progress = [],
     highest_seq_done = {_Ts, ?LOWEST_SEQ}} = State) ->

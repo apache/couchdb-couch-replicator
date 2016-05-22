@@ -13,43 +13,63 @@
 
 -module(couch_replicator_sup).
 -behaviour(supervisor).
--export([start_link/0, init/1]).
+-export([start_link/0, init/1, restart_mdb_listener/0]).
 
 start_link() ->
     supervisor:start_link({local, ?MODULE}, ?MODULE, []).
 
 init(_Args) ->
+    MdbChangesArgs = [
+        <<"_replicator">>,  % DbSuffix
+        couch_replicator,   % Module
+        nil,                % Callback context
+        [skip_ddocs]        % Options
+    ],
     Children = [
-        {couch_replicator_scheduler,
-            {couch_replicator_scheduler, start_link, []},
-            permanent,
-            brutal_kill,
-            worker,
-            [couch_replicator_scheduler]},
         {couch_replicator_scheduler_sup,
             {couch_replicator_scheduler_sup, start_link, []},
             permanent,
             infinity,
             supervisor,
             [couch_replicator_scheduler_sup]},
+        {couch_replicator_scheduler,
+            {couch_replicator_scheduler, start_link, []},
+            permanent,
+            brutal_kill,
+            worker,
+            [couch_replicator_scheduler]},
         {couch_replication_event,
             {gen_event, start_link, [{local, couch_replication}]},
             permanent,
             brutal_kill,
             worker,
             dynamic},
-        {couch_replicator_manager_sup,
-	    {couch_replicator_manager_sup, start_link, []},
-	    permanent,
-            infinity,
-	    supervisor,
-            [couch_replicator_manager_sup]},
-        {couch_replicator_job_sup,
-            {couch_replicator_job_sup, start_link, []},
+        {couch_replicator_clustering,
+            {couch_replicator_clustering, start_link, []},
             permanent,
-            infinity,
-            supervisor,
-            [couch_replicator_job_sup]}
+            brutal_kill,
+            worker,
+            [couch_replicator_clustering]},
+        {couch_replicator,
+            % This is simple function call which does not create a process
+            % but returns `ignore`. It is used to make sure each node
+            % a local `_replicator` database.
+            {couch_replicator, ensure_rep_db_exists, []},
+            transient,
+            brutal_kill,
+            worker,
+            [couch_replicator]},
+        {couch_multidb_changes,
+            {couch_multidb_changes, start_link, MdbChangesArgs},
+            permanent,
+            brutal_kill,
+            worker,
+            [couch_multidb_changes]}
     ],
-    {ok, {{one_for_one,10,1}, Children}}.
+    {ok, {{rest_for_one,10,1}, Children}}.
 
+
+restart_mdb_listener() ->
+    ok = supervisor:terminate_child(?MODULE, couch_multidb_changes),
+    {ok, ChildPid} = supervisor:restart_child(?MODULE, couch_multidb_changes),
+    ChildPid.

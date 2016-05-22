@@ -28,11 +28,16 @@ should_load_modules() ->
         couch_replicator_httpc,
         couch_replicator_httpd,
         couch_replicator_manager,
+        couch_replicator_scheduler,
+        couch_replicator_scheduler_job,
+        couch_replicator_docs,
+        couch_replicator_clustering,
+        couch_replicator_changes_reader,
+        couch_replicator_ids,
         couch_replicator_notifier,
         couch_replicator,
         couch_replicator_worker,
-        couch_replicator_utils,
-        couch_replicator_job_sup
+        couch_replicator_utils
     ],
     [should_load_module(Mod) || Mod <- Modules].
 

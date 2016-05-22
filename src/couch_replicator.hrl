@@ -23,3 +23,5 @@
     doc_id,
     db_name = null
 }).
+
+-type rep_id() :: {string(), string()}.

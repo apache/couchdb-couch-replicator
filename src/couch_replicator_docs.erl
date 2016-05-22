@@ -18,7 +18,6 @@
 -export([
     update_doc_triggered/3,
     update_doc_completed/3,
-    update_doc_error/4,
     update_doc_replication_id/3,
     update_doc_process_error/3
 ]).
@@ -50,7 +49,7 @@
 
 -define(replace(L, K, V), lists:keystore(K, 1, L, {K, V})).
 
-
+-spec update_doc_triggered(binary(), binary(), rep_id()) -> any().
 update_doc_triggered(DbName, DocId, {BaseId, _}) ->
     update_rep_doc(DbName, DocId, [
             {<<"_replication_state">>, <<"triggered">>},
@@ -59,6 +58,7 @@ update_doc_triggered(DbName, DocId, {BaseId, _}) ->
             {<<"_replication_stats">>, undefined}]).
 
 
+-spec update_doc_completed(binary(), binary(), [_]) -> any().
 update_doc_completed(DbName, DocId, Stats) ->
     update_rep_doc(DbName, DocId, [
         {<<"_replication_state">>, <<"completed">>},
@@ -66,14 +66,7 @@ update_doc_completed(DbName, DocId, Stats) ->
         {<<"_replication_stats">>, {Stats}}]).
 
 
-update_doc_error(DbName, DocId, {BaseId, _}, Error) ->
-    ErrorBinary = couch_replicator_utils:rep_error_to_binary(Error),
-    update_rep_doc(DbName, DocId, [
-            {<<"_replication_state">>, <<"error">>},
-            {<<"_replication_state_reason">>, ErrorBinary},
-            {<<"_replication_id">>, ?l2b(BaseId)}]).
-
-
+-spec update_doc_process_error(binary(), binary(), any()) -> any().
 update_doc_process_error(DbName, DocId, Error) ->
     Reason = case Error of
         {bad_rep_doc, Reas} ->
@@ -87,10 +80,12 @@ update_doc_process_error(DbName, DocId, Error) ->
         {<<"_replication_state_reason">>, Reason}]).
 
 
+-spec update_doc_replication_id(binary(), binary(), binary()) -> any().
 update_doc_replication_id(DbName, DocId, RepId) ->
     update_rep_doc(DbName, DocId, [{<<"_replication_id">>, RepId}]).
 
 
+-spec ensure_rep_db_exists() -> {ok, #db{}}.
 ensure_rep_db_exists() ->
     Db = case couch_db:open_int(?REP_DB_NAME, [?CTX, sys_db, nologifmissing]) of
         {ok, Db0} ->
@@ -99,10 +94,11 @@ ensure_rep_db_exists() ->
             {ok, Db0} = couch_db:create(?REP_DB_NAME, [?CTX, sys_db]),
             Db0
     end,
-    ensure_rep_ddoc_exists(?REP_DB_NAME),
+    ok = ensure_rep_ddoc_exists(?REP_DB_NAME),
     {ok, Db}.
 
 
+-spec ensure_rep_ddoc_exists(binary()) -> ok.
 ensure_rep_ddoc_exists(RepDb) ->
     case mem3:belongs(RepDb, ?REP_DESIGN_DOC) of
 	true ->
@@ -111,7 +107,7 @@ ensure_rep_ddoc_exists(RepDb) ->
 	    ok
     end.
 
-
+-spec ensure_rep_ddoc_exists(binary(), binary()) -> ok.
 ensure_rep_ddoc_exists(RepDb, DDocId) ->
     case open_rep_doc(RepDb, DDocId) of
         {ok, _Doc} ->
@@ -123,7 +119,8 @@ ensure_rep_ddoc_exists(RepDb, DDocId) ->
                 {<<"validate_doc_update">>, ?REP_DB_DOC_VALIDATE_FUN}
             ]}),
             try
-                {ok, _} = save_rep_doc(RepDb, DDoc)
+                {ok, _} = save_rep_doc(RepDb, DDoc),
+                ok
             catch
                 throw:conflict ->
                     % NFC what to do about this other than
@@ -133,6 +130,7 @@ ensure_rep_ddoc_exists(RepDb, DDocId) ->
     end.
 
 
+-spec parse_rep_doc({[_]}) -> #rep{}.
 parse_rep_doc(RepDoc) ->
     {ok, Rep} = try
         parse_rep_doc(RepDoc, rep_user_ctx(RepDoc))
@@ -144,6 +142,8 @@ parse_rep_doc(RepDoc) ->
     end,
     Rep.
 
+
+-spec parse_rep_doc({[_]}, #user_ctx{}) -> {ok, #rep{}}.
 parse_rep_doc({Props}, UserCtx) ->
     ProxyParams = parse_proxy_params(get_value(<<"proxy">>, Props, <<>>)),
     Options = make_options(Props),
@@ -250,6 +250,7 @@ save_rep_doc(DbName, Doc) ->
 
 % RFC3339 timestamps.
 % Note: doesn't include the time seconds fraction (RFC3339 says it's optional).
+-spec timestamp() -> binary().
 timestamp() ->
     {{Year, Month, Day}, {Hour, Min, Sec}} = calendar:now_to_local_time(os:timestamp()),
     UTime = erlang:universaltime(),
@@ -262,14 +263,14 @@ timestamp() ->
             [Year, Month, Day, Hour, Min, Sec,
                 zone(DiffSecs div 3600, (DiffSecs rem 3600) div 60)])).
 
-
+-spec zone(integer(), integer()) -> iolist().
 zone(Hr, Min) when Hr >= 0, Min >= 0 ->
     io_lib:format("+~2..0w:~2..0w", [Hr, Min]);
 zone(Hr, Min) ->
     io_lib:format("-~2..0w:~2..0w", [abs(Hr), abs(Min)]).
 
 
-
+-spec rep_user_ctx({[_]}) -> #user_ctx{}.
 rep_user_ctx({RepDoc}) ->
     case get_json_value(<<"user_ctx">>, RepDoc) of
     undefined ->
@@ -281,7 +282,7 @@ rep_user_ctx({RepDoc}) ->
         }
     end.
 
-
+-spec parse_rep_db({[_]} | binary(), [_], [_]) -> #httpd{} | binary().
 parse_rep_db({Props}, ProxyParams, Options) ->
     Url = maybe_add_trailing_slash(get_value(<<"url">>, Props)),
     {AuthProps} = get_value(<<"auth">>, Props, {[]}),
@@ -324,7 +325,7 @@ parse_rep_db(<<"https://", _/binary>> = Url, ProxyParams, Options) ->
 parse_rep_db(<<DbName/binary>>, _ProxyParams, _Options) ->
     DbName.
 
-
+-spec maybe_add_trailing_slash(binary() | list()) -> list().
 maybe_add_trailing_slash(Url) when is_binary(Url) ->
     maybe_add_trailing_slash(?b2l(Url));
 maybe_add_trailing_slash(Url) ->
@@ -335,7 +336,7 @@ maybe_add_trailing_slash(Url) ->
         Url ++ "/"
     end.
 
-
+-spec make_options([_]) -> [_].
 make_options(Props) ->
     Options0 = lists:ukeysort(1, convert_options(Props)),
     Options = check_options(Options0),
@@ -361,6 +362,7 @@ make_options(Props) ->
     ])).
 
 
+-spec convert_options([_]) -> [_].
 convert_options([])->
     [];
 convert_options([{<<"cancel">>, V} | R]) ->
@@ -412,6 +414,7 @@ convert_options([{<<"checkpoint_interval">>, V} | R]) ->
 convert_options([_ | R]) -> % skip unknown option
     convert_options(R).
 
+-spec check_options([_]) -> [_].
 check_options(Options) ->
     DocIds = lists:keyfind(doc_ids, 1, Options),
     Filter = lists:keyfind(filter, 1, Options),
@@ -425,7 +428,7 @@ check_options(Options) ->
             throw({bad_request, "`doc_ids`, `filter`, `selector` are mutually exclusive options"})
     end.
 
-
+-spec parse_proxy_params(binary() | [_]) -> [_].
 parse_proxy_params(ProxyUrl) when is_binary(ProxyUrl) ->
     parse_proxy_params(?b2l(ProxyUrl));
 parse_proxy_params([]) ->
@@ -446,7 +449,7 @@ parse_proxy_params(ProxyUrl) ->
             [{proxy_user, User}, {proxy_password, Passwd}]
         end.
 
-
+-spec ssl_params([_]) -> [_].
 ssl_params(Url) ->
     case ibrowse_lib:parse_url(Url) of
     #url{protocol = https} ->
@@ -474,22 +477,15 @@ ssl_params(Url) ->
         []
     end.
 
-ssl_verify_options(Value) ->
-    ssl_verify_options(Value, erlang:system_info(otp_release)).
-
-ssl_verify_options(true, OTPVersion) when OTPVersion >= "R14" ->
+-spec ssl_verify_options(true | false) -> [_].
+ssl_verify_options(true) ->
     CAFile = config:get("replicator", "ssl_trusted_certificates_file"),
     [{verify, verify_peer}, {cacertfile, CAFile}];
-ssl_verify_options(false, OTPVersion) when OTPVersion >= "R14" ->
-    [{verify, verify_none}];
-ssl_verify_options(true, _OTPVersion) ->
-    CAFile = config:get("replicator", "ssl_trusted_certificates_file"),
-    [{verify, 2}, {cacertfile, CAFile}];
-ssl_verify_options(false, _OTPVersion) ->
-    [{verify, 0}].
+ssl_verify_options(false) ->
+    [{verify, verify_none}].
 
 
-
+-spec before_doc_update(#doc{}, #db{}) -> #doc{}.
 before_doc_update(#doc{id = <<?DESIGN_DOC_PREFIX, _/binary>>} = Doc, _Db) ->
     Doc;
 before_doc_update(#doc{body = {Body}} = Doc, #db{user_ctx=UserCtx} = Db) ->
@@ -517,6 +513,7 @@ before_doc_update(#doc{body = {Body}} = Doc, #db{user_ctx=UserCtx} = Db) ->
     end.
 
 
+-spec after_doc_read(#doc{}, #db{}) -> #doc{}.
 after_doc_read(#doc{id = <<?DESIGN_DOC_PREFIX, _/binary>>} = Doc, _Db) ->
     Doc;
 after_doc_read(#doc{body = {Body}} = Doc, #db{user_ctx=UserCtx} = Db) ->
@@ -543,7 +540,9 @@ Body)),
     end.
 
 
-
+-spec strip_credentials(undefined) -> undefined;
+    (binary()) -> binary();
+    ({[_]}) -> {[_]}.
 strip_credentials(undefined) ->
     undefined;
 strip_credentials(Url) when is_binary(Url) ->

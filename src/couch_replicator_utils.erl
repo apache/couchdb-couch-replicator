@@ -19,10 +19,12 @@
 -export([sum_stats/2, is_deleted/1]).
 -export([rep_error_to_binary/1]).
 -export([get_json_value/2, get_json_value/3]).
+-export([pp_rep_id/1]).
 
 -export([handle_db_event/3]).
 
 -include_lib("couch/include/couch_db.hrl").
+-include("couch_replicator.hrl").
 
 -import(couch_util, [
     get_value/2,
@@ -100,6 +102,14 @@ get_json_value(Key, Props, Default) when is_binary(Key) ->
         Else ->
             Else
     end.
+
+
+% pretty-print replication id
+-spec pp_rep_id(#rep{} | rep_id()) -> string().
+pp_rep_id(#rep{id = RepId}) ->
+    pp_rep_id(RepId);
+pp_rep_id({Base, Extension}) ->
+    Base ++ Extension.
 
 
 % NV: TODO: this function is not used outside api wrap module

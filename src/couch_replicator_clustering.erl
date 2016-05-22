@@ -42,28 +42,24 @@ start_link() ->
 
 
 % owner/2 function computes ownership for a {DbName, DocId} tuple
-% Returns {ok no_owner} in case no DocId is null. That case
-% would happen in the old replicator_manager if replication was
-% posted from _replicate endpoint and not via a document in 
-% *_replicator db.
-%
-% {error, unstable} value is returned if cluster membership has
-% been changing recently. Recency is a configuration parameter.
+% Returns `no_owner` in case no DocId is null, `unstable` if cluster
+% is considered to be unstable i.e. it has changed recently, or returns
+% node() which is considered to be the owner.
 %
 -spec owner(Dbname :: binary(), DocId :: binary() | null) ->
-    {ok, node()} | {ok, no_owner} | {error, unstable}.
+    node() | no_owner | unstable.
 owner(_DbName, null) ->
-    {ok, no_owner};
+    no_owner;
 owner(<<"shards/", _/binary>> = DbName, DocId) ->
     IsStable = gen_server:call(?MODULE, is_stable, infinity),
     case IsStable of
         false ->
-            {error, unstable};
+            unstable;
         true ->
-            {ok, owner_int(DbName, DocId)}
+            owner_int(DbName, DocId)
     end;
 owner(_DbName, _DocId) ->
-    {ok, node()}.
+    node().
 
 
 
@@ -149,7 +145,7 @@ new_timer(Interval) ->
 
 trigger_rescan() ->
     couch_log:notice("Triggering replicator rescan from ~p", [?MODULE]),
-    couch_replicator_manager_sup:restart_mdb_listener(),
+    couch_replicator_sup:restart_mdb_listener(),
     ok.
 
 is_stable(State) ->
