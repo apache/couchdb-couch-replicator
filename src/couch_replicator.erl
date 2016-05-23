@@ -11,31 +11,17 @@
 % the License.
 
 -module(couch_replicator).
--behaviour(couch_multidb_changes).
 
-% public API
--export([replicate/2]).
-
-% called from couch_replicator_sup supervisor
--export([ensure_rep_db_exists/0]).
-
-% multidb changes callback
--export([db_created/2, db_deleted/2, db_found/2, db_change/3]).
+-export([replicate/2, ensure_rep_db_exists/0]).
+-export([rep_state/1]).
 
 -include_lib("couch/include/couch_db.hrl").
 -include("couch_replicator.hrl").
-
--import(couch_replicator_utils, [
-    get_json_value/2,
-    get_json_value/3,
-    pp_rep_id/1
-]).
 
 -import(couch_util, [
     get_value/2,
     get_value/3
 ]).
-
 
 
 -spec replicate({[_]}, #user_ctx{}) ->
@@ -69,34 +55,6 @@ ensure_rep_db_exists() ->
     ignore.
 
 
-%%%%%% Multidb changes callbacks
-
-db_created(DbName, Server) ->
-    couch_replicator_docs:ensure_rep_ddoc_exists(DbName),
-    Server.
-
-db_deleted(DbName, Server) ->
-    clean_up_replications(DbName),
-    Server.
-
-db_found(DbName, Server) ->
-    couch_replicator_docs:ensure_rep_ddoc_exists(DbName),
-    Server.
-
-db_change(DbName, {ChangeProps} = Change, Server) ->
-    try
-        ok = process_update(DbName, Change)
-    catch
-    _Tag:Error ->
-        {RepProps} = get_json_value(doc, ChangeProps),
-        DocId = get_json_value(<<"_id">>, RepProps),
-        couch_replicator_docs:update_doc_process_error(DbName, DocId, Error)
-    end,
-    Server.
-
-
-%%%%%%%%% Private helper functions
-
 -spec do_replication_loop(#rep{}) ->
     {ok, {continuous, binary()}} | {ok, tuple()} | {error, any()}.
 do_replication_loop(#rep{id = {BaseId, Ext} = Id, options = Options} = Rep) ->
@@ -114,6 +72,7 @@ do_replication_loop(#rep{id = {BaseId, Ext} = Id, options = Options} = Rep) ->
         wait_for_result(Id)
     end.
 
+
 -spec rep_result_listener(rep_id()) -> {ok, pid()}.
 rep_result_listener(RepId) ->
     ReplyTo = self(),
@@ -123,6 +82,7 @@ rep_result_listener(RepId) ->
             (_) ->
                 ok
         end).
+
 
 -spec wait_for_result(rep_id()) ->
     {ok, any()} | {error, any()}.
@@ -168,104 +128,6 @@ cancel_replication(RepId, #user_ctx{name = Name, roles = Roles}) ->
             {error, not_found}
         end
      end.
-
-
-
--spec process_update(binary(), {[_]}) -> ok.
-process_update(DbName, {Change}) ->
-    {RepProps} = JsonRepDoc = get_json_value(doc, Change),
-    DocId = get_json_value(<<"_id">>, RepProps),
-    Owner = couch_replicator_clustering:owner(DbName, DocId),
-    case {Owner, get_json_value(deleted, Change, false)} of
-    {_, true} ->
-        remove_jobs(DbName, DocId);
-    {unstable, false} ->
-	couch_log:notice("Not starting '~s' as cluster is unstable", [DocId]);
-    {ThisNode, false} when ThisNode =:= node() ->
-        couch_log:notice("Maybe starting '~s' as I'm the owner", [DocId]),
-        case get_json_value(<<"_replication_state">>, RepProps) of
-        undefined ->
-            maybe_start_replication(DbName, DocId, JsonRepDoc);
-        <<"triggered">> ->
-            maybe_start_replication(DbName, DocId, JsonRepDoc);
-        <<"completed">> ->
-            couch_log:notice("Replication '~s' marked as completed", [DocId])
-        end;
-     {Owner, false} ->
-         couch_log:notice("Not starting '~s' as owner is ~s.", [DocId, Owner])
-    end,
-    ok.
-
-
--spec maybe_start_replication(binary(), binary(), {[_]}) -> ok.
-maybe_start_replication(DbName, DocId, RepDoc) ->
-    Rep0 = couch_replicator_docs:parse_rep_doc(RepDoc),
-    #rep{id = {BaseId, _} = RepId} = Rep0,
-    Rep = Rep0#rep{db_name = DbName},
-    case rep_state(RepId) of
-    nil ->
-        couch_log:notice("Attempting to start replication `~s` (document `~s`).",
-            [pp_rep_id(RepId), DocId]),
-        case couch_replicator_scheduler:add_job(Rep) of
-        ok ->
-            ok;
-        {error, already_added} ->
-            couch_log:warning("replicator scheduler: ~p was already added", [Rep])
-        end,
-        ok;
-    #rep{doc_id = DocId} ->
-        ok;
-    #rep{db_name = DbName, doc_id = OtherDocId} ->
-        couch_log:notice("The replication specified by the document `~s` already started"
-            " triggered by the document `~s`", [DocId, OtherDocId]),
-        maybe_tag_rep_doc(DbName, DocId, RepDoc, ?l2b(BaseId))
-    end,
-    ok.
-
-
--spec maybe_tag_rep_doc(binary(), binary(), {[_]}, binary()) -> ok.
-maybe_tag_rep_doc(DbName, DocId, {RepProps}, RepId) ->
-    case get_json_value(<<"_replication_id">>, RepProps) of
-    RepId ->
-        ok;
-    _ ->
-        couch_replicator_docs:update_doc_replication_id(DbName, DocId, RepId)
-    end.
-
-
--spec remove_jobs(binary(), binary()) -> ok.
-remove_jobs(DbName, DocId) ->
-    LogMsg = "Stopped replication `~s` , replication document `~s`",
-    [
-        begin
-            couch_replicator_scheduler:remove_job(RepId),
-            couch_log:notice(LogMsg, [pp_rep_id(RepId), DocId])
-        end || RepId <- find_jobs_by_doc(DbName, DocId)
-    ],
-    ok.
-
-
-% TODO: make this a function in couch_replicator_scheduler API
--spec clean_up_replications(binary()) -> ok.
-clean_up_replications(DbName) ->
-    RepIds = find_jobs_by_dbname(DbName),
-    lists:foreach(fun couch_replicator_scheduler:remove_job/1, RepIds).
-
-
-% TODO: make this a function in couch_replicator_scheduler API
--spec find_jobs_by_dbname(binary()) -> list(#rep{}).
-find_jobs_by_dbname(DbName) ->
-    RepSpec = #rep{db_name = DbName, _ = '_'},
-    MatchSpec = {job, '$1', RepSpec, '_', '_'},
-    [RepId || [RepId] <- ets:match(couch_replicator_scheduler, MatchSpec)].
-
-
-% TODO: make this a function in couch_replicator_scheduler API
--spec find_jobs_by_doc(binary(), binary()) -> list(#rep{}).
-find_jobs_by_doc(DbName, DocId) ->
-    RepSpec =  #rep{db_name = DbName, doc_id = DocId, _ = '_'},
-    MatchSpec = {job, '$1', RepSpec, '_', '_'},
-    [RepId || [RepId] <- ets:match(couch_replicator_scheduler, MatchSpec)].
 
 
 % TODO: make this a function in couch_replicator_scheduler API

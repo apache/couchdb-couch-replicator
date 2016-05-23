@@ -20,10 +20,10 @@ start_link() ->
 
 init(_Args) ->
     MdbChangesArgs = [
-        <<"_replicator">>,  % DbSuffix
-        couch_replicator,   % Module
-        nil,                % Callback context
-        [skip_ddocs]        % Options
+        <<"_replicator">>,               % DbSuffix
+        couch_replicator_doc_processor,  % Module
+        nil,                             % Callback context
+        [skip_ddocs]                     % Options
     ],
     Children = [
         {couch_replicator_scheduler_sup,
