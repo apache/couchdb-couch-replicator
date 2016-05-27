@@ -50,7 +50,9 @@ replicate(PostBody, Ctx) ->
 
 % This is called from supervisor. Must respect supervisor protocol so
 % it returns `ignore`.
+-spec ensure_rep_db_exists() -> ignore.
 ensure_rep_db_exists() ->
+    {ok, _Db} = couch_replicator_docs:ensure_rep_db_exists(),
     couch_log:notice("~p : created local _replicator database", [?MODULE]),
     ignore.
 

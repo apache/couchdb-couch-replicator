@@ -10,12 +10,26 @@
 % License for the specific language governing permissions and limitations under
 % the License.
 
+
+% Maintain cluster membership and stability notifications for replications.
+% On changes to cluster membership, broadcast events to `replication` gen_event.
+% Listeners will get `{cluster, stable}` or `{cluster, unstable}` events.
+%
+% Cluster stability is defined as "there have been no nodes added or removed in
+% last `QuietPeriod` seconds". QuietPeriod value is configurable. To ensure a
+% speedier startup, during initialization there is a shorter StartupQuietPeriod in
+% effect (also configurable).
+%
+% This module is also in charge of calculating ownership of replications based on
+% where their _repicator db documents shards live.
+
+
 -module(couch_replicator_clustering).
 -behaviour(gen_server).
 -behaviour(config_listener).
 
 % public API
--export([start_link/0, owner/2, owner/1]).
+-export([start_link/0, owner/2, is_stable/0]).
 
 % gen_server callbacks
 -export([init/1, handle_call/3, handle_info/2, handle_cast/2,
@@ -28,10 +42,13 @@
 -include_lib("mem3/include/mem3.hrl").
 
 -define(DEFAULT_QUIET_PERIOD, 60). % seconds
+-define(DEFAULT_START_PERIOD, 5). % seconds
 
 -record(state, {
+    start_time :: erlang:timestamp(),
     last_change :: erlang:timestamp(),
-    quiet_period = ?DEFAULT_QUIET_PERIOD :: non_neg_integer(),
+    period = ?DEFAULT_QUIET_PERIOD :: non_neg_integer(),
+    start_period = ?DEFAULT_START_PERIOD :: non_neg_integer(),
     timer :: timer:tref()
 }).
 
@@ -51,8 +68,7 @@ start_link() ->
 owner(_DbName, null) ->
     no_owner;
 owner(<<"shards/", _/binary>> = DbName, DocId) ->
-    IsStable = gen_server:call(?MODULE, is_stable, infinity),
-    case IsStable of
+    case is_stable() of
         false ->
             unstable;
         true ->
@@ -62,40 +78,27 @@ owner(_DbName, _DocId) ->
     node().
 
 
-
-% owner/1 function computes ownership based on the single
-% input Key parameter. It will uniformly distribute this Key
-% across the list of current live nodes in the cluster without
-% regard to shard ownership.
-%
-% Originally this function was used in chttpd for replications
-% coming from _replicate endpoint. It was called choose_node
-% and was called like this:
-%  choose_node([couch_util:get_value(<<"source">>, Props),
-%               couch_util:get_value(<<"target">>, Props)])
-%
--spec owner(term()) -> node().
-owner(Key) when is_binary(Key) ->
-    Checksum = erlang:crc32(Key),
-    Nodes = lists:sort([node() | nodes()]),
-    lists:nth(1 + Checksum rem length(Nodes), Nodes);
-owner(Key) ->
-    owner(term_to_binary(Key)).
+-spec is_stable() -> true | false.
+is_stable() ->
+    gen_server:call(?MODULE, is_stable, infinity).
 
 
 % gen_server callbacks
 
-
 init([]) ->
     net_kernel:monitor_nodes(true),
     ok = config:listen_for_changes(?MODULE, self()),
-    Interval = config:get_integer("replicator", "cluster_quiet_period", 
-        ?DEFAULT_QUIET_PERIOD),
+    Period = abs(config:get_integer("replicator", "cluster_quiet_period",
+        ?DEFAULT_QUIET_PERIOD)),
+    StartPeriod = abs(config:get_integer("replicator", "cluster_start_period",
+        ?DEFAULT_START_PERIOD)),
     couch_log:debug("Initialized clustering gen_server ~w", [self()]),
     {ok, #state{
+        start_time = os:timestamp(),
         last_change = os:timestamp(),
-        quiet_period = Interval,
-        timer = new_timer(Interval)
+        period = Period,
+        start_period = StartPeriod,
+        timer = new_timer(StartPeriod)
     }}.
 
 
@@ -103,29 +106,32 @@ handle_call(is_stable, _From, State) ->
     {reply, is_stable(State), State}.
 
 
-handle_cast({set_quiet_period, QuietPeriod}, State) when
+handle_cast({set_period, QuietPeriod}, State) when
     is_integer(QuietPeriod), QuietPeriod > 0 ->
-    {noreply, State#state{quiet_period = QuietPeriod}}.
+    {noreply, State#state{period = QuietPeriod}}.
 
 
-handle_info({nodeup, _Node}, State) ->
-    Ts = os:timestamp(),
-    Timer = new_timer(State#state.quiet_period),
-    {noreply, State#state{last_change = Ts, timer = Timer}};
+handle_info({nodeup, Node}, State) ->
+    Timer = new_timer(interval(State)),
+    couch_replicator_notifier:notify({cluster, unstable}),
+    couch_log:notice("~s : nodeup ~s, cluster unstable", [?MODULE, Node]),
+    {noreply, State#state{last_change = os:timestamp(), timer = Timer}};
 
-handle_info({nodedown, _Node}, State) ->
-    Ts = os:timestamp(),
-    Timer = new_timer(State#state.quiet_period),
-    {noreply, State#state{last_change = Ts, timer = Timer}};
+handle_info({nodedown, Node}, State) ->
+    Timer = new_timer(interval(State)),
+    couch_replicator_notifier:notify({cluster, unstable}),
+    couch_log:notice("~s : nodedown ~s, cluster unstable", [?MODULE, Node]),
+    {noreply, State#state{last_change = os:timestamp(), timer = Timer}};
 
-handle_info(rescan_check, State) ->
+handle_info(stability_check, State) ->
    timer:cancel(State#state.timer),
    case is_stable(State) of
        true ->
-	   trigger_rescan(),
+	   couch_replicator_notifier:notify({cluster, stable}),
+           couch_log:notice("~s : publishing cluster `stable` event", [?MODULE]),
            {noreply, State};
        false ->
-	   Timer = new_timer(State#state.quiet_period),
+	   Timer = new_timer(interval(State)),
 	   {noreply, State#state{timer = Timer}}
    end.
 
@@ -139,28 +145,41 @@ terminate(_Reason, _State) ->
 
 %% Internal functions
 
+-spec new_timer(non_neg_integer()) -> timer:tref().
 new_timer(Interval) ->
-    {ok, Timer} = timer:send_after(Interval, rescan_check),
+    {ok, Timer} = timer:send_after(Interval, stability_check),
     Timer.
 
-trigger_rescan() ->
-    couch_log:notice("Triggering replicator rescan from ~p", [?MODULE]),
-    couch_replicator_sup:restart_mdb_listener(),
-    ok.
 
-is_stable(State) ->
-    % os:timestamp() results are not guaranteed to be monotonic
-    Sec = case timer:now_diff(os:timestamp(), State#state.last_change) of
+-spec interval(#state{}) -> non_neg_integer().
+interval(#state{period = Period, start_period = Period0, start_time = T0}) ->
+    case now_diff_sec(T0) > Period of
+        true ->
+            % Normal operation
+            Period;
+        false ->
+            % During startup
+            Period0
+    end.
+
+
+-spec is_stable(#state{}) -> boolean().
+is_stable(#state{period = Period, last_change = TS} = State) ->
+    now_diff_sec(TS) > interval(State).
+
+
+-spec now_diff_sec(erlang:timestamp()) -> non_neg_integer().
+now_diff_sec(Time) ->
+    case timer:now_diff(os:timestamp(), Time) of
         USec when USec < 0 ->
             0;
         USec when USec >= 0 ->
              USec / 1000000
-    end,
-    Sec > State#state.quiet_period.
+    end.
 
 
 handle_config_change("replicator", "cluster_quiet_period", V, _, S) ->
-    ok = gen_server:cast(S, {set_quiet_period, list_to_integer(V)}),
+    ok = gen_server:cast(S, {set_period, list_to_integer(V)}),
     {ok, S};
 handle_config_change(_, _, _, _, S) ->
     {ok, S}.
@@ -173,7 +192,7 @@ handle_config_terminate(Self, _, _) ->
         config:listen_for_changes(?MODULE, Self)
     end).
 
-
+-spec owner_int(binary(), binary()) -> node().
 owner_int(DbName, DocId) ->
     Live = [node() | nodes()],
     Nodes = [N || #shard{node=N} <- mem3:shards(mem3:dbname(DbName), DocId),

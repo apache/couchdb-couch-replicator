@@ -145,7 +145,7 @@ handle_cast({resume_scan, DbName}, #state{pids=Pids, tid=Ets} = State) ->
 
 
 handle_info({'EXIT', From, normal}, #state{scanner = From} = State) ->
-    couch_log:info("multidb_changes ~p scanner pid exited ~p",[State#state.suffix, From]),
+    couch_log:debug("multidb_changes ~p scanner pid exited ~p",[State#state.suffix, From]),
     {noreply, State#state{scanner=nil}};
 
 handle_info({'EXIT', From, Reason}, #state{scanner = From} = State) ->
