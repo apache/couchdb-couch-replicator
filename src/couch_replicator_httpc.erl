@@ -27,6 +27,7 @@
 
 -define(replace(L, K, V), lists:keystore(K, 1, L, {K, V})).
 -define(MAX_WAIT, 5 * 60 * 1000).
+-define(MAX_BACKOFF_WAIT, 250 * 32768).
 -define(STREAM_STATUS, ibrowse_stream_status).
 
 
@@ -138,6 +139,8 @@ process_response({ibrowse_req_id, ReqId}, Worker, HttpDb, Params, Callback) ->
 
 process_response({ok, Code, Headers, Body}, Worker, HttpDb, Params, Callback) ->
     case list_to_integer(Code) of
+    C when C =:= 429 ->
+        maybe_retry(back_off, Worker, HttpDb, Params);
     Ok when (Ok >= 200 andalso Ok < 300) ; (Ok >= 400 andalso Ok < 500) ->
         couch_stats:increment_counter([couch_replicator, responses, success]),
         EJson = case Body of
@@ -162,6 +165,9 @@ process_stream_response(ReqId, Worker, HttpDb, Params, Callback) ->
     receive
     {ibrowse_async_headers, ReqId, Code, Headers} ->
         case list_to_integer(Code) of
+        C when C =:= 429 ->
+            maybe_retry(back_off, Worker,
+                HttpDb#httpdb{timeout = ?MAX_BACKOFF_WAIT}, Params);
         Ok when (Ok >= 200 andalso Ok < 300) ; (Ok >= 400 andalso Ok < 500) ->
             StreamDataFun = fun() ->
                 stream_data_self(HttpDb, Params, Worker, ReqId, Callback)
@@ -251,16 +257,40 @@ clean_mailbox(_, Count) when Count > 0 ->
 maybe_retry(Error, Worker, #httpdb{retries = 0} = HttpDb, Params) ->
     report_error(Worker, HttpDb, Params, {error, Error});
 
+%% For 429 errors, we perform an exponential backoff up to 250 * 2^15
+%% times, or roughly 2.17 hours. Since the #httpd.retries is initialized
+%% to 10 and we need 15, we use the Wait time as a timeout/failure end.
+maybe_retry(backoff, Worker, #httpdb{wait = Wait} = HttpDb, Params) ->
+    ok = timer:sleep(random:uniform(Wait)),
+    Wait2 = Wait*2,
+    case Wait2 of
+        W0 when W0 >= 512000 -> % Past 8 min, we log retries
+            log_retry_error(Params, HttpDb, Wait, "429 Retry");
+        W1 when W1 > ?MAX_BACKOFF_WAIT ->
+            report_error(Worker, HttpDb, Params, {error,
+                "429 Retry Timeout"});
+        _ ->
+            NewWait = erlang:min(Wait2, ?MAX_BACKOFF_WAIT),
+            NewHttpDb = HttpDb#httpdb{wait = NewWait},
+            throw({retry, NewHttpDb, Params})
+    end;
+
 maybe_retry(Error, _Worker, #httpdb{retries = Retries, wait = Wait} = HttpDb,
     Params) ->
-    Method = string:to_upper(atom_to_list(get_value(method, Params, get))),
-    Url = couch_util:url_strip_password(full_url(HttpDb, Params)),
-    couch_log:notice("Retrying ~s request to ~s in ~p seconds due to error ~s",
-        [Method, Url, Wait / 1000, error_cause(Error)]),
-    ok = timer:sleep(Wait),
+    log_retry_error(Params, HttpDb, Wait, Error),
+    % This is so that a long backoff time is not used to ensure
+    % backwards compatibility.
+    ok = timer:sleep(erlang:min(Wait, ?MAX_WAIT)),
     Wait2 = erlang:min(Wait * 2, ?MAX_WAIT),
     NewHttpDb = HttpDb#httpdb{retries = Retries - 1, wait = Wait2},
     throw({retry, NewHttpDb, Params}).
+
+
+log_retry_error(Params, HttpDb, Wait, Error) ->
+    Method = string:to_upper(atom_to_list(get_value(method, Params, get))),
+    Url = couch_util:url_strip_password(full_url(HttpDb, Params)),
+    couch_log:notice("Retrying ~s request to ~s in ~p seconds due to error ~s",
+        [Method, Url, Wait / 1000, error_cause(Error)]).
 
 
 report_error(_Worker, HttpDb, Params, Error) ->
