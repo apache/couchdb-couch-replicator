@@ -28,6 +28,7 @@
 -define(replace(L, K, V), lists:keystore(K, 1, L, {K, V})).
 -define(MAX_WAIT, 5 * 60 * 1000).
 -define(MAX_BACKOFF_WAIT, 250 * 32768).
+-define(MAX_BACKOFF_LOG_THRESHOLD, 512000).
 -define(STREAM_STATUS, ibrowse_stream_status).
 
 
@@ -139,7 +140,7 @@ process_response({ibrowse_req_id, ReqId}, Worker, HttpDb, Params, Callback) ->
 
 process_response({ok, Code, Headers, Body}, Worker, HttpDb, Params, Callback) ->
     case list_to_integer(Code) of
-    C when C =:= 429 ->
+    429 ->
         maybe_retry(back_off, Worker, HttpDb, Params);
     Ok when (Ok >= 200 andalso Ok < 300) ; (Ok >= 400 andalso Ok < 500) ->
         couch_stats:increment_counter([couch_replicator, responses, success]),
@@ -165,7 +166,7 @@ process_stream_response(ReqId, Worker, HttpDb, Params, Callback) ->
     receive
     {ibrowse_async_headers, ReqId, Code, Headers} ->
         case list_to_integer(Code) of
-        C when C =:= 429 ->
+        429 ->
             maybe_retry(back_off, Worker,
                 HttpDb#httpdb{timeout = ?MAX_BACKOFF_WAIT}, Params);
         Ok when (Ok >= 200 andalso Ok < 300) ; (Ok >= 400 andalso Ok < 500) ->
@@ -264,7 +265,7 @@ maybe_retry(backoff, Worker, #httpdb{wait = Wait} = HttpDb, Params) ->
     ok = timer:sleep(random:uniform(Wait)),
     Wait2 = Wait*2,
     case Wait2 of
-        W0 when W0 >= 512000 -> % Past 8 min, we log retries
+        W0 when W0 >= ?MAX_BACKOFF_LOG_THRESHOLD -> % Past 8 min, we log retries
             log_retry_error(Params, HttpDb, Wait, "429 Retry");
         W1 when W1 > ?MAX_BACKOFF_WAIT ->
             report_error(Worker, HttpDb, Params, {error,
