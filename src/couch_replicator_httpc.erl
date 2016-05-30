@@ -283,7 +283,8 @@ maybe_retry(Error, _Worker, #httpdb{retries = Retries, wait = Wait} = HttpDb,
     % backwards compatibility.
     ok = timer:sleep(erlang:min(Wait, ?MAX_WAIT)),
     Wait2 = erlang:min(Wait * 2, ?MAX_WAIT),
-    NewHttpDb = HttpDb#httpdb{retries = Retries - 1, wait = Wait2},
+    WaitR = random:uniform(Wait2),
+    NewHttpDb = HttpDb#httpdb{retries = Retries - 1, wait = WaitR},
     throw({retry, NewHttpDb, Params}).
 
 
