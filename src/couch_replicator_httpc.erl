@@ -141,7 +141,7 @@ process_response({ibrowse_req_id, ReqId}, Worker, HttpDb, Params, Callback) ->
 process_response({ok, Code, Headers, Body}, Worker, HttpDb, Params, Callback) ->
     case list_to_integer(Code) of
     429 ->
-        maybe_retry(back_off, Worker, HttpDb, Params);
+        maybe_retry(backoff, Worker, HttpDb, Params);
     Ok when (Ok >= 200 andalso Ok < 300) ; (Ok >= 400 andalso Ok < 500) ->
         couch_stats:increment_counter([couch_replicator, responses, success]),
         EJson = case Body of
@@ -167,7 +167,7 @@ process_stream_response(ReqId, Worker, HttpDb, Params, Callback) ->
     {ibrowse_async_headers, ReqId, Code, Headers} ->
         case list_to_integer(Code) of
         429 ->
-            maybe_retry(back_off, Worker,
+            maybe_retry(backoff, Worker,
                 HttpDb#httpdb{timeout = ?MAX_BACKOFF_WAIT}, Params);
         Ok when (Ok >= 200 andalso Ok < 300) ; (Ok >= 400 andalso Ok < 500) ->
             StreamDataFun = fun() ->
