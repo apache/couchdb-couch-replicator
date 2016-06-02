@@ -80,7 +80,7 @@ owner(_DbName, _DocId) ->
 
 -spec is_stable() -> true | false.
 is_stable() ->
-    gen_server:call(?MODULE, is_stable, infinity).
+    gen_server:call(?MODULE, is_stable).
 
 
 % gen_server callbacks
