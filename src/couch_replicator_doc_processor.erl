@@ -68,7 +68,15 @@ process_update(DbName, {Change}) ->
         <<"triggered">> ->
             maybe_start_replication(DbName, DocId, JsonRepDoc);
         <<"completed">> ->
-            couch_log:notice("Replication '~s' marked as completed", [DocId])
+            couch_log:notice("Replication '~s' marked as completed", [DocId]);
+        <<"error">> ->
+            % Handle replications started from older versions of replicator
+            % which wrote transient errors to replication docs
+            maybe_start_replication(DbName, DocId, JsonRepDoc);
+        <<"failed">> ->
+            Reason = get_json_value(<<"_replication_state_reason">>, RepProps),
+            Msg = "Replication '~s' marked as failed with reason '~s'",
+            couch_log:warning(Msg, [DocId, Reason])
         end;
      {Owner, false} ->
          couch_log:notice("Not starting '~s' as owner is ~s.", [DocId, Owner])

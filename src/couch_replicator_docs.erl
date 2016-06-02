@@ -76,7 +76,7 @@ update_doc_process_error(DbName, DocId, Error) ->
     end,
     couch_log:error("Error processing replication doc `~s`: ~s", [DocId, Reason]),
     update_rep_doc(DbName, DocId, [
-        {<<"_replication_state">>, <<"error">>},
+        {<<"_replication_state">>, <<"failed">>},
         {<<"_replication_state_reason">>, Reason}]).
 
 
