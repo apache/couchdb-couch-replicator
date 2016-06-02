@@ -104,18 +104,18 @@ maybe_start_replication(DbName, DocId, RepDoc) ->
         ok;
     #rep{doc_id = null} ->
         couch_log:warning("Replication `~s` specified by document `~s`"
-        " already running as a transient replication, started via `_replicate`"
-        " API endpoint", [pp_rep_id(RepId), DocId]);
+            " already running as a transient replication, started via"
+            " `_replicate` API endpoint", [pp_rep_id(RepId), DocId]);
     #rep{db_name = OtherDbName, doc_id = OtherDocId} ->
         case mem3:dbname(OtherDbName) =:= mem3:dbname(DbName) of
         true ->
             couch_log:notice("Replication `~s` specified by document `~s`"
-            " already started, triggered by document `~s` from the same"
-            " database", [pp_rep_id(RepId), DocId, OtherDocId]);
+                " already started, triggered by document `~s` from the same"
+                " database", [pp_rep_id(RepId), DocId, OtherDocId]);
         false ->
             couch_log:warning("Replication `~s` specified by document `~s`"
-            " already started triggered by document `~s` from a different"
-            " database", [pp_rep_id(RepId), DocId, OtherDocId])
+                " already started triggered by document `~s` from a different"
+                " database", [pp_rep_id(RepId), DocId, OtherDocId])
         end,
         maybe_tag_rep_doc(DbName, DocId, RepDoc, ?l2b(BaseId))
     end,
