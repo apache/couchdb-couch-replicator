@@ -164,7 +164,7 @@ interval(#state{period = Period, start_period = Period0, start_time = T0}) ->
 
 
 -spec is_stable(#state{}) -> boolean().
-is_stable(#state{period = Period, last_change = TS} = State) ->
+is_stable(#state{last_change = TS} = State) ->
     now_diff_sec(TS) > interval(State).
 
 
