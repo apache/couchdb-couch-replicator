@@ -16,7 +16,7 @@
 -export([before_doc_update/2, after_doc_read/2]).
 -export([ensure_rep_db_exists/0, ensure_rep_ddoc_exists/1]).
 -export([
-    update_doc_triggered/3,
+    remove_state_fields/2,
     update_doc_completed/3,
     update_doc_replication_id/3,
     update_doc_process_error/3
@@ -49,14 +49,12 @@
 
 -define(replace(L, K, V), lists:keystore(K, 1, L, {K, V})).
 
--spec update_doc_triggered(binary(), binary(), rep_id()) -> any().
-update_doc_triggered(DbName, DocId, {BaseId, _}) ->
+remove_state_fields(DbName, DocId) ->
     update_rep_doc(DbName, DocId, [
-            {<<"_replication_state">>, <<"triggered">>},
-            {<<"_replication_state_reason">>, undefined},
-            {<<"_replication_id">>, ?l2b(BaseId)},
-            {<<"_replication_stats">>, undefined}]).
-
+        {<<"_replication_state">>, undefined},
+        {<<"_replication_state_time">>, undefined},
+        {<<"_replication_state_reason">>, undefined},
+        {<<"_replication_stats">>, undefined}]).
 
 -spec update_doc_completed(binary(), binary(), [_]) -> any().
 update_doc_completed(DbName, DocId, Stats) ->

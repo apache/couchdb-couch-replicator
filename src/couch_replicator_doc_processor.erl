@@ -66,12 +66,14 @@ process_update(DbName, {Change}) ->
         undefined ->
             maybe_start_replication(DbName, DocId, JsonRepDoc);
         <<"triggered">> ->
+            couch_replicator_docs:remove_state_fields(DbName, DocId),
             maybe_start_replication(DbName, DocId, JsonRepDoc);
         <<"completed">> ->
             couch_log:notice("Replication '~s' marked as completed", [DocId]);
         <<"error">> ->
             % Handle replications started from older versions of replicator
             % which wrote transient errors to replication docs
+            couch_replicator_docs:remove_state_fields(DbName, DocId),
             maybe_start_replication(DbName, DocId, JsonRepDoc);
         <<"failed">> ->
             Reason = get_json_value(<<"_replication_state_reason">>, RepProps),

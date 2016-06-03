@@ -459,8 +459,7 @@ report_job_error(_Rep, _Error) ->
 -spec doc_update_triggered(#rep{}) -> ok.
 doc_update_triggered(#rep{db_name = null}) ->
     ok;
-doc_update_triggered(#rep{id = RepId, db_name = DbName, doc_id = DocId}) ->
-    couch_replicator_docs:update_doc_triggered(DbName, DocId, RepId),
+doc_update_triggered(#rep{id = RepId, doc_id = DocId}) ->
     couch_log:notice("Document `~s` triggered replication `~s`",
         [DocId, pp_rep_id(RepId)]),
     ok.
