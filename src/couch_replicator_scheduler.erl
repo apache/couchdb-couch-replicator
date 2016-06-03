@@ -84,7 +84,6 @@ init(_) ->
 handle_call({add_job, Job}, _From, State) ->
     case add_job_int(Job) of
         true ->
-            start_pending_jobs(State#state.max_jobs),
             {reply, ok, State};
         false ->
             {reply, {error, already_added}, State}
