@@ -61,7 +61,6 @@ process_update(DbName, {Change}) ->
     {unstable, false} ->
 	couch_log:notice("Not starting '~s' as cluster is unstable", [DocId]);
     {ThisNode, false} when ThisNode =:= node() ->
-        couch_log:notice("Maybe starting '~s' as I'm the owner", [DocId]),
         case get_json_value(<<"_replication_state">>, RepProps) of
         undefined ->
             maybe_start_replication(DbName, DocId, JsonRepDoc);
@@ -81,7 +80,7 @@ process_update(DbName, {Change}) ->
             couch_log:warning(Msg, [DocId, Reason])
         end;
     {Owner, false} ->
-        couch_log:notice("Not starting '~s' as owner is ~s.", [DocId, Owner])
+        ok
     end,
     ok.
 
@@ -93,8 +92,6 @@ maybe_start_replication(DbName, DocId, RepDoc) ->
     Rep = Rep0#rep{db_name = DbName},
     case couch_replicator:rep_state(RepId) of
     nil ->
-        couch_log:notice("Attempting to start replication `~s` (document `~s`).",
-            [pp_rep_id(RepId), DocId]),
         case couch_replicator_scheduler:add_job(Rep) of
         ok ->
             ok;
@@ -136,11 +133,9 @@ maybe_tag_rep_doc(DbName, DocId, {RepProps}, RepId) ->
 
 -spec remove_jobs(binary(), binary()) -> ok.
 remove_jobs(DbName, DocId) ->
-    LogMsg = "Stopped replication `~s` , replication document `~s`",
     [
         begin
-            couch_replicator_scheduler:remove_job(RepId),
-            couch_log:notice(LogMsg, [pp_rep_id(RepId), DocId])
+            couch_replicator_scheduler:remove_job(RepId)
         end || RepId <- find_jobs_by_doc(DbName, DocId)
     ],
     ok.
