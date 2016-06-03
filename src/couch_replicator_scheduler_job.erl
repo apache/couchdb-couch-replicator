@@ -347,7 +347,7 @@ handle_cast(checkpoint, State) ->
         end;
     Other when Other =/= node() ->
         couch_log:notice("Replication `~s` usurped by ~s (triggered by `~s`)",
-            [Rep#rep.id, Other, DocId]),
+            [pp_rep_id(Rep#rep.id), Other, DocId]),
         {stop, shutdown, State}
     end;
 
