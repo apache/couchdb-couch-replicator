@@ -125,6 +125,15 @@ handle_info(reschedule, State) ->
     {ok, Timer} = timer:send_after(State#state.interval, reschedule),
     {noreply, State#state{timer = Timer}};
 
+handle_info({'DOWN', _Ref, process, Pid, normal}, State) ->
+    case job_by_pid(Pid) of
+        {ok, #job{}=Job} ->
+            remove_job_int(Job);
+        _Else ->
+            ok
+    end,
+    {noreply, State};
+
 handle_info({'DOWN', _Ref, process, Pid, Reason}, State) ->
     case job_by_pid(Pid) of
         {ok, #job{}=Job0} ->
