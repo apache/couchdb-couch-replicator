@@ -103,7 +103,7 @@ handle_call(_, _From, State) ->
     {noreply, State}.
 
 
-handle_cast({set_max_jobs, MaxJobs}, State) when is_integer(MaxJobs), MaxJobs > 0 ->
+handle_cast({set_max_jobs, MaxJobs}, State) when is_integer(MaxJobs), MaxJobs >= 0 ->
     couch_log:notice("~p: max_jobs set to ~B", [?MODULE, MaxJobs]),
     {noreply, State#state{max_jobs = MaxJobs}};
 
@@ -310,7 +310,7 @@ job_by_id(Id) ->
 
 -spec reschedule(MaxJobs :: non_neg_integer(), MaxChurn :: non_neg_integer()) -> ok.
 reschedule(MaxJobs, MaxChurn)
-  when is_integer(MaxJobs), MaxJobs > 0, is_integer(MaxChurn), MaxChurn > 0 ->
+  when is_integer(MaxJobs), MaxJobs >= 0, is_integer(MaxChurn), MaxChurn > 0 ->
     Running = running_job_count(),
     Pending = pending_job_count(),
     stop_excess_jobs(MaxJobs, Running),
