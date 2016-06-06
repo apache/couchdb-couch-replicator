@@ -68,16 +68,14 @@ process_update(DbName, {Change}) ->
             couch_replicator_docs:remove_state_fields(DbName, DocId),
             maybe_start_replication(DbName, DocId, JsonRepDoc);
         <<"completed">> ->
-            couch_log:notice("Replication '~s' marked as completed", [DocId]);
+            couch_log:notice("Ignoring completed replication '~s'", [DocId]);
         <<"error">> ->
             % Handle replications started from older versions of replicator
             % which wrote transient errors to replication docs
             couch_replicator_docs:remove_state_fields(DbName, DocId),
             maybe_start_replication(DbName, DocId, JsonRepDoc);
         <<"failed">> ->
-            Reason = get_json_value(<<"_replication_state_reason">>, RepProps),
-            Msg = "Replication '~s' marked as failed with reason '~s'",
-            couch_log:warning(Msg, [DocId, Reason])
+            couch_log:warning("Ignoring failed replication '~s'", [DocId])
         end;
     {Owner, false} ->
         ok
