@@ -19,7 +19,7 @@
 -include("couch_replicator.hrl").
 
 %% public api
--export([start_link/0, add_job/1, remove_job/1]).
+-export([start_link/0, add_job/1, remove_job/1, reschedule/0]).
 
 %% gen_server callbacks
 -export([init/1, terminate/2, code_change/3]).
@@ -69,6 +69,11 @@ remove_job(Id) ->
     gen_server:call(?MODULE, {remove_job, Id}).
 
 
+-spec reschedule() -> ok.
+% Trigger a manual reschedule. Used for testing and/or ops.
+reschedule() ->
+    gen_server:call(?MODULE, reschedule).
+
 %% gen_server functions
 
 init(_) ->
@@ -98,6 +103,10 @@ handle_call({remove_job, Id}, _From, State) ->
         {error, not_found} ->
             {reply, ok, State}
     end;
+
+handle_call(reschedule, _From, State) ->
+    ok = reschedule(State#state.max_jobs, State#state.max_churn),
+    {reply, ok, State};
 
 handle_call(_, _From, State) ->
     {noreply, State}.
