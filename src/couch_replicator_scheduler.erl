@@ -45,7 +45,8 @@
 -record(job, {
           id :: job_id(),
           rep :: #rep{},
-          pid :: pid(),
+          pid :: undefined | pid(),
+          monitor :: undefined | reference(),
           history :: history()}).
 
 %% public functions
@@ -135,27 +136,20 @@ handle_info(reschedule, State) ->
     {noreply, State#state{timer = Timer}};
 
 handle_info({'DOWN', _Ref, process, Pid, normal}, State) ->
-    case job_by_pid(Pid) of
-        {ok, #job{}=Job} ->
-            remove_job_int(Job);
-        _Else ->
-            ok
-    end,
+    {ok, Job} = job_by_pid(Pid),
+    couch_log:notice("~p: Job ~p completed normally", [?MODULE, Job#job.id]),
+    remove_job_int(Job),
     {noreply, State};
 
 handle_info({'DOWN', _Ref, process, Pid, Reason}, State) ->
-    case job_by_pid(Pid) of
-        {ok, #job{}=Job0} ->
-            couch_log:notice("~p: Job ~p died with reason: ~p",
-                             [?MODULE, Job0#job.id, Reason]),
-            Job1 = update_history(Job0#job{pid = undefined}, crashed, os:timestamp()),
-            true = ets:insert(?MODULE, Job1),
-            start_pending_jobs(State#state.max_jobs),
-            {noreply, State};
-        {error, not_found} ->
-            % removed in remove_job and should not be reinserted.
-            {noreply, State}
-    end;
+    {ok, Job0} = job_by_pid(Pid),
+    couch_log:notice("~p: Job ~p died with reason: ~p",
+        [?MODULE, Job0#job.id, Reason]),
+    Job1 = update_history(Job0#job{pid = undefined, monitor = undefined},
+        crashed, os:timestamp()),
+    true = ets:insert(?MODULE, Job1),
+    start_pending_jobs(State#state.max_jobs),
+    {noreply, State};
 
 handle_info(_, State) ->
     {noreply, State}.
@@ -249,8 +243,9 @@ start_job_int(#job{pid = Pid}) when Pid /= undefined ->
 start_job_int(#job{} = Job0) ->
     case couch_replicator_scheduler_sup:start_child(Job0#job.rep) of
         {ok, Child} ->
-            monitor(process, Child),
-            Job1 = update_history(Job0#job{pid = Child}, started, os:timestamp()),
+            Ref = monitor(process, Child),
+            Job1 = update_history(Job0#job{pid = Child, monitor = Ref},
+                started, os:timestamp()),
             true = ets:insert(?MODULE, Job1),
             couch_log:notice("~p: Job ~p started as ~p",
                 [?MODULE, Job1#job.id, Job1#job.pid]);
@@ -266,7 +261,9 @@ stop_job_int(#job{pid = undefined}) ->
 
 stop_job_int(#job{} = Job0) ->
     ok = couch_replicator_scheduler_sup:terminate_child(Job0#job.pid),
-    Job1 = update_history(Job0#job{pid = undefined}, stopped, os:timestamp()),
+    demonitor(Job0#job.monitor, [flush]),
+    Job1 = update_history(Job0#job{pid = undefined, monitor = undefined},
+        stopped, os:timestamp()),
     true = ets:insert(?MODULE, Job1),
     couch_log:notice("~p: Job ~p stopped as ~p",
         [?MODULE, Job0#job.id, Job0#job.pid]).
