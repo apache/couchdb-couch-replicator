@@ -16,9 +16,7 @@
 language: erlang
 
 otp_release:
-  - 18.2
-  - 18.1
-  - 18.0
+  - 18.3
   - 17.5
   - R16B03-1
 
@@ -42,3 +40,6 @@ script:
   - make eunit apps=couch_replicator skip_deps=couch_epi,couch_log
 
 cache: apt
+
+notifications:
+  email: false
