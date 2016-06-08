@@ -90,6 +90,12 @@ init(_) ->
 handle_call({add_job, Job}, _From, State) ->
     case add_job_int(Job) of
         true ->
+            case running_job_count() of
+                RunningJobs when RunningJobs < State#state.max_jobs ->
+                    start_job_int(Job);
+                _ ->
+                    ok
+                end,
             {reply, ok, State};
         false ->
             {reply, {error, already_added}, State}
