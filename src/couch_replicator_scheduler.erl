@@ -313,13 +313,12 @@ running_job_count() ->
 
 -spec running_jobs() -> [#job{}].
 running_jobs() ->
-    ets:tab2list(?MODULE) -- pending_jobs().
+    ets:select(?MODULE, [{#job{pid = '$1', _='_'}, [{is_pid, '$1'}], ['$_']}]).
 
 
 -spec pending_job_count() -> non_neg_integer().
 pending_job_count() ->
-    MatchSpec = [{#job{pid='$1', _='_'}, [{'not', {'is_pid', '$1'}}], [true]}],
-    ets:select_count(?MODULE, MatchSpec).
+    ets:select_count(?MODULE, [{#job{pid=undefined, _='_'}, [], [true]}]).
 
 
 -spec pending_jobs() -> [#job{}].
