@@ -30,13 +30,14 @@
 -export([handle_config_change/5, handle_config_terminate/3]).
 
 %% types
--type event_type() :: started | stopped | crashed.
+-type event_type() :: started | stopped | {crashed, any()}.
 -type event() :: {Type:: event_type(), When :: erlang:timestamp()}.
 -type history() :: [Events :: event()].
 
 %% definitions
 -define(MAX_HISTORY, 20).
--define(MINIMUM_CRASH_INTERVAL, 60 * 1000000).
+-define(MAX_BACKOFF_EXPONENT, 10).
+-define(BACKOFF_INTERVAL_MICROS, 30 * 1000 * 1000).
 
 -define(DEFAULT_MAX_JOBS, 100).
 -define(DEFAULT_MAX_CHURN, 20).
@@ -152,7 +153,7 @@ handle_info({'DOWN', _Ref, process, Pid, Reason}, State) ->
     couch_log:notice("~p: Job ~p died with reason: ~p",
         [?MODULE, Job0#job.id, Reason]),
     Job1 = update_history(Job0#job{pid = undefined, monitor = undefined},
-        crashed, os:timestamp()),
+        {crashed, Reason}, os:timestamp()),
     true = ets:insert(?MODULE, Job1),
     start_pending_jobs(State#state.max_jobs),
     {noreply, State};
@@ -225,17 +226,27 @@ oldest_job_first(#job{} = A, #job{} = B) ->
 
 
 not_recently_crashed(#job{} = Job) ->
-    case crash_history(Job) of
+    case Job#job.history of
         [] ->
             true;
-        [{crashed, When} | _] ->
-            timer:now_diff(os:timestamp(), When)
-                >= ?MINIMUM_CRASH_INTERVAL
+        [stopped | _] ->
+            true;
+        _ ->
+            EventsBeforeStop = lists:takewhile(
+                fun({Event, _}) -> Event =/= stopped end, Job#job.history),
+            Crashes = lists:filter(
+                fun({{crashed, _Reason}, _When}) -> true; (_) -> false end,
+                EventsBeforeStop
+            ),
+            case Crashes of
+                [] ->
+                    true;
+                [{{crashed, _Reason}, When} | _] ->
+                    BackoffExp = erlang:min(length(Crashes) - 1, ?MAX_BACKOFF_EXPONENT),
+                    BackoffInterval = (1 bsl BackoffExp) * ?BACKOFF_INTERVAL_MICROS,
+                    timer:now_diff(os:timestamp(), When) >= BackoffInterval
+            end
     end.
-
-
-crash_history(#job{} = Job) ->
-    [Crash || {crashed, _When} = Crash <- Job#job.history].
 
 
 -spec add_job_int(#job{}) -> boolean().
