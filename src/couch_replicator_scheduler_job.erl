@@ -424,19 +424,18 @@ terminate(shutdown, {error, Class, Error, Stack, InitArgs}) ->
     _ ->
         NotifyError = Error
     end,
-    couch_replicator_notifier:notify({error, RepId, NotifyError}),
-    report_job_error(InitArgs, NotifyError);
+    couch_replicator_notifier:notify({error, RepId, NotifyError});
+
 terminate(Reason, State) ->
     #rep_state{
         source_name = Source,
         target_name = Target,
-        rep_details = #rep{id = {BaseId, Ext} = RepId} = Rep
+        rep_details = #rep{id = {BaseId, Ext} = RepId}
     } = State,
     couch_log:error("Replication `~s` (`~s` -> `~s`) failed: ~s",
         [BaseId ++ Ext, Source, Target, to_binary(Reason)]),
     terminate_cleanup(State),
-    couch_replicator_notifier:notify({error, RepId, Reason}),
-    report_job_error(Rep, Reason).
+    couch_replicator_notifier:notify({error, RepId, Reason}).
 
 terminate_cleanup(State) ->
     update_task(State),
@@ -449,12 +448,6 @@ terminate_cleanup(State) ->
 format_status(_Opt, [_PDict, State]) ->
     [{data, [{"State", state_strip_creds(State)}]}].
 
-
-report_job_error(_Rep, _Error) ->
-    % TODO: handle errors back to job scheduler to let it
-    % decide if needed to backoff and retry and what the back-off schedule
-    % should be
-    ok.
 
 -spec doc_update_triggered(#rep{}) -> ok.
 doc_update_triggered(#rep{db_name = null}) ->
