@@ -101,7 +101,7 @@ handle_call({add_job, Job}, _From, State) ->
         true ->
             case running_job_count() of
                 RunningJobs when RunningJobs < State#state.max_jobs ->
-                    start_job_int(Job, State#state.max_history);
+                    start_job_int(Job, State);
                 _ ->
                     ok
                 end,
@@ -113,7 +113,7 @@ handle_call({add_job, Job}, _From, State) ->
 handle_call({remove_job, Id}, _From, State) ->
     case job_by_id(Id) of
         {ok, Job} ->
-            ok = stop_job_int(Job, State#state.max_history),
+            ok = stop_job_int(Job, State),
             true = remove_job_int(Job),
             {reply, ok, State};
         {error, not_found} ->
@@ -121,7 +121,7 @@ handle_call({remove_job, Id}, _From, State) ->
     end;
 
 handle_call(reschedule, _From, State) ->
-    ok = reschedule(State#state.max_jobs, State#state.max_churn, State#state.max_history),
+    ok = reschedule(State),
     {reply, ok, State};
 
 handle_call(_, _From, State) ->
@@ -149,7 +149,7 @@ handle_cast(_, State) ->
 
 
 handle_info(reschedule, State) ->
-    ok = reschedule(State#state.max_jobs, State#state.max_churn, State#state.max_history),
+    ok = reschedule(State),
     {ok, cancel} = timer:cancel(State#state.timer),
     {ok, Timer} = timer:send_after(State#state.interval, reschedule),
     {noreply, State#state{timer = Timer}};
@@ -165,9 +165,9 @@ handle_info({'DOWN', _Ref, process, Pid, Reason}, State) ->
     couch_log:notice("~p: Job ~p died with reason: ~p",
         [?MODULE, Job0#job.id, Reason]),
     Job1 = update_history(Job0#job{pid = undefined, monitor = undefined},
-        {crashed, Reason}, os:timestamp(), State#state.max_history),
+        {crashed, Reason}, os:timestamp(), State),
     true = ets:insert(?MODULE, Job1),
-    start_pending_jobs(State#state.max_jobs, State#state.max_history),
+    start_pending_jobs(State),
     {noreply, State};
 
 handle_info(_, State) ->
@@ -222,20 +222,20 @@ handle_config_terminate(Self, _, _) ->
 
 %% private functions
 
-start_jobs(Count, MaxHistory) ->
+start_jobs(Count, State) ->
     Runnable0 = pending_jobs(),
     Runnable1 = lists:sort(fun oldest_job_first/2, Runnable0),
     Runnable2 = lists:filter(fun not_recently_crashed/1, Runnable1),
     Runnable3 = lists:sublist(Runnable2, Count),
-    [start_job_int(Job, MaxHistory) || Job <- Runnable3],
+    [start_job_int(Job, State) || Job <- Runnable3],
     ok.
 
 
-stop_jobs(Count, MaxHistory) ->
+stop_jobs(Count, State) ->
     Running0 = running_jobs(),
     Running1 = lists:sort(fun oldest_job_first/2, Running0),
     Running2 = lists:sublist(Running1, Count),
-    [stop_job_int(Job, MaxHistory) || Job <- Running2],
+    [stop_job_int(Job, State) || Job <- Running2],
     ok.
 
 
@@ -269,15 +269,15 @@ add_job_int(#job{} = Job) ->
     ets:insert_new(?MODULE, Job).
 
 
-start_job_int(#job{pid = Pid}, _MaxHistory) when Pid /= undefined ->
+start_job_int(#job{pid = Pid}, _State) when Pid /= undefined ->
     ok;
 
-start_job_int(#job{} = Job0, MaxHistory) ->
+start_job_int(#job{} = Job0, State) ->
     case couch_replicator_scheduler_sup:start_child(Job0#job.rep) of
         {ok, Child} ->
             Ref = monitor(process, Child),
             Job1 = update_history(Job0#job{pid = Child, monitor = Ref},
-                started, os:timestamp(), MaxHistory),
+                started, os:timestamp(), State),
             true = ets:insert(?MODULE, Job1),
             couch_log:notice("~p: Job ~p started as ~p",
                 [?MODULE, Job1#job.id, Job1#job.pid]);
@@ -287,15 +287,15 @@ start_job_int(#job{} = Job0, MaxHistory) ->
     end.
 
 
--spec stop_job_int(#job{}, non_neg_integer()) -> ok | {error, term()}.
-stop_job_int(#job{pid = undefined}, _MaxHistory) ->
+-spec stop_job_int(#job{}, #state{}) -> ok | {error, term()}.
+stop_job_int(#job{pid = undefined}, _State) ->
     ok;
 
-stop_job_int(#job{} = Job0, MaxHistory) ->
+stop_job_int(#job{} = Job0, State) ->
     ok = couch_replicator_scheduler_sup:terminate_child(Job0#job.pid),
     demonitor(Job0#job.monitor, [flush]),
     Job1 = update_history(Job0#job{pid = undefined, monitor = undefined},
-        stopped, os:timestamp(), MaxHistory),
+        stopped, os:timestamp(), State),
     true = ets:insert(?MODULE, Job1),
     couch_log:notice("~p: Job ~p stopped as ~p",
         [?MODULE, Job0#job.id, Job0#job.pid]).
@@ -346,40 +346,44 @@ job_by_id(Id) ->
     end.
 
 
--spec reschedule(MaxJobs :: non_neg_integer(), MaxChurn :: non_neg_integer(), MaxHistory :: non_neg_integer()) -> ok.
-reschedule(MaxJobs, MaxChurn, MaxHistory)
-  when is_integer(MaxJobs), MaxJobs >= 0, is_integer(MaxChurn), MaxChurn > 0 ->
+-spec reschedule(#state{}) -> ok.
+reschedule(State) ->
     Running = running_job_count(),
     Pending = pending_job_count(),
-    stop_excess_jobs(MaxJobs, MaxHistory, Running),
-    start_pending_jobs(MaxJobs, MaxHistory, Running, Pending),
-    rotate_jobs(MaxJobs, MaxHistory, MaxChurn, Running, Pending).
+    stop_excess_jobs(State, Running),
+    start_pending_jobs(State, Running, Pending),
+    rotate_jobs(State, Running, Pending).
 
 
-stop_excess_jobs(MaxJobs, MaxHistory, Running) when Running > MaxJobs ->
-    stop_jobs(Running - MaxJobs, MaxHistory);
-
-stop_excess_jobs(_, _, _) ->
-    ok.
-
-
-start_pending_jobs(MaxJobs, MaxHistory) ->
-    start_pending_jobs(MaxJobs, MaxHistory, running_job_count(), pending_job_count()).
+stop_excess_jobs(State, Running) ->
+    #state{max_jobs=MaxJobs} = State,
+    if Running > MaxJobs ->
+        stop_jobs(Running - MaxJobs, State);
+    true ->
+        ok
+    end.
 
 
-start_pending_jobs(MaxJobs, MaxHistory, Running, Pending) when Running < MaxJobs, Pending > 0 ->
-    start_jobs(MaxJobs - Running, MaxHistory);
+start_pending_jobs(State) ->
+    start_pending_jobs(State, running_job_count(), pending_job_count()).
 
-start_pending_jobs(_, _, _, _) ->
-    ok.
 
-rotate_jobs(MaxJobs, MaxHistory, MaxChurn, Running, Pending) when Running == MaxJobs, Pending > 0 ->
-    stop_jobs(min([Pending, Running, MaxChurn]), MaxHistory),
-    start_jobs(min([Pending, Running, MaxChurn]), MaxHistory);
+start_pending_jobs(State, Running, Pending) ->
+    #state{max_jobs=MaxJobs} = State,
+    if Running < MaxJobs, Pending > 0 ->
+        start_jobs(MaxJobs - Running, State);
+    true ->
+        ok
+    end.
 
-rotate_jobs(_, _, _, _, _) ->
-    ok.
-
+rotate_jobs(State, Running, Pending) ->
+    #state{max_jobs=MaxJobs, max_churn=MaxChurn} = State,
+    if Running == MaxJobs, Pending > 0 ->
+        stop_jobs(min([Pending, Running, MaxChurn]), State),
+        start_jobs(min([Pending, Running, MaxChurn]), State);
+    true ->
+        ok
+    end.
 
 min(List) ->
     hd(lists:sort(List)).
@@ -396,8 +400,8 @@ last_started(#job{} = Job) ->
     end.
 
 
--spec update_history(#job{}, event_type(), erlang:timestamp(), non_neg_integer()) -> #job{}.
-update_history(Job, Type, When, MaxHistory) ->
+-spec update_history(#job{}, event_type(), erlang:timestamp(), #state{}) -> #job{}.
+update_history(Job, Type, When, State) ->
     History0 = [{Type, When} | Job#job.history],
-    History1 = lists:sublist(History0, MaxHistory),
+    History1 = lists:sublist(History0, State#state.max_history),
     Job#job{history = History1}.
