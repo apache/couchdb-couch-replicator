@@ -250,18 +250,25 @@ not_recently_crashed(#job{} = Job) ->
         [{stopped, _When} | _] ->
             true;
         _ ->
-            EventsBeforeStop = lists:takewhile(
-                fun({Event, _}) -> Event =/= stopped end, Job#job.history),
-            Crashes = [Crash || {{crashed, _Reason}, _When} = Crash <- EventsBeforeStop],
-            case Crashes of
+            case Crashes = crashes_before_stop(Job) of
                 [] ->
                     true;
                 [{{crashed, _Reason}, When} | _] ->
-                    BackoffExp = erlang:min(length(Crashes) - 1, ?MAX_BACKOFF_EXPONENT),
-                    BackoffInterval = (1 bsl BackoffExp) * ?BACKOFF_INTERVAL_MICROS,
-                    timer:now_diff(os:timestamp(), When) >= BackoffInterval
+                    timer:now_diff(os:timestamp(), When) >= backoff_micros(length(Crashes))
             end
     end.
+
+-spec crashes_before_stop(#job{}) -> list().
+crashes_before_stop(#job{history = History}) ->
+    EventsBeforeStop = lists:takewhile(
+        fun({Event, _}) -> Event =/= stopped end, History),
+    [Crash || {{crashed, _Reason}, _When} = Crash <- EventsBeforeStop].
+
+
+-spec backoff_micros(non_neg_integer()) -> non_neg_integer().
+backoff_micros(CrashCount) ->
+    BackoffExp = erlang:min(CrashCount - 1, ?MAX_BACKOFF_EXPONENT),
+    (1 bsl BackoffExp) * ?BACKOFF_INTERVAL_MICROS.
 
 
 -spec add_job_int(#job{}) -> boolean().
@@ -390,11 +397,10 @@ min(List) ->
 
 -spec last_started(#job{}) -> erlang:timestamp().
 last_started(#job{} = Job) ->
-    Starts = [E || {started, _} = E <- Job#job.history],
-    case Starts of
-        [] ->
+    case lists:keyfind(started, 1, Job#job.history) of
+        false ->
             {0, 0, 0};
-        [{started, When} | _] ->
+        {started, When} ->
             When
     end.
 
@@ -404,3 +410,96 @@ update_history(Job, Type, When, State) ->
     History0 = [{Type, When} | Job#job.history],
     History1 = lists:sublist(History0, State#state.max_history),
     Job#job{history = History1}.
+
+
+
+-ifdef(TEST).
+-include_lib("eunit/include/eunit.hrl").
+
+
+backoff_micros_test_() ->
+    BaseInterval = ?BACKOFF_INTERVAL_MICROS,
+    [?_assertEqual(R * BaseInterval, backoff_micros(N)) || {R, N} <- [
+        {1, 1}, {2, 2}, {4, 3}, {8, 4}, {16, 5}, {32, 6}, {64, 7}, {128, 8},
+        {256, 9}, {512, 10}, {1024, 11}, {1024, 12}
+    ]].
+
+
+crashes_before_stop_test_() ->
+    [?_assertEqual(R, crashes_before_stop(job(H))) || {R, H} <- [
+        {[], []},
+        {[], [stopped()]},
+        {[crashed()], [crashed()]},
+        {[crashed()], [started(), crashed()]},
+        {[crashed(3), crashed(1)], [crashed(3), started(2), crashed(1)]},
+        {[], [stopped(), crashed()]},
+        {[crashed(3)], [crashed(3), stopped(2), crashed(1)]}
+    ]].
+
+
+last_started_test_() ->
+    [?_assertEqual({0, R, 0}, last_started(job(H))) || {R, H} <- [
+         {0, []},
+         {0, [crashed(1)]},
+         {1, [started(1)]},
+         {2, [started(2), started(1)]},
+         {2, [crashed(3), started(2), started(1)]}
+    ]].
+
+
+not_recently_crashed_test_() ->
+    [?_assertEqual(R, not_recently_crashed(job(H))) || {R, H} <- [
+        {true, []},
+        {true, [stopped()]},
+        {true, [crashed(0)]},
+        {false, [crashed(os:timestamp())]},
+        {true, [stopped(), crashed(os:timestamp())]}
+    ]].
+
+
+oldest_job_first_test() ->
+    J0 = job([crashed()]),
+    J1 = job([started(1)]),
+    J2 = job([started(2)]),
+    Sort = fun(Jobs) -> lists:sort(fun oldest_job_first/2, Jobs) end,
+    ?assertEqual([], Sort([])),
+    ?assertEqual([J1], Sort([J1])),
+    ?assertEqual([J1, J2], Sort([J2, J1])),
+    ?assertEqual([J0, J1, J2], Sort([J2, J1, J0])).
+
+
+% Test helper functions
+
+
+job(Hist) when is_list(Hist) ->
+    #job{history=Hist}.
+
+
+crashed() ->
+    crashed(0).
+
+
+crashed(WhenSec) when is_integer(WhenSec)->
+    {{crashed, some_reason}, {0, WhenSec, 0}};
+crashed({MSec, Sec, USec}) ->
+    {{crashed, some_reason}, {MSec, Sec, USec}}.
+
+
+started() ->
+    started(0).
+
+
+started(WhenSec) ->
+    {started, {0, WhenSec, 0}}.
+
+
+stopped() ->
+    stopped(0).
+
+
+stopped(WhenSec) ->
+    {stopped, {0, WhenSec, 0}}.
+
+
+-endif.
+
