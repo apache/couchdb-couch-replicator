@@ -20,6 +20,7 @@
 
 %% public api
 -export([start_link/0, add_job/1, remove_job/1, reschedule/0]).
+-export([rep_state/1, find_jobs_by_dbname/1, find_jobs_by_doc/2]).
 
 %% gen_server callbacks
 -export([init/1, terminate/2, code_change/3]).
@@ -75,6 +76,32 @@ remove_job(Id) ->
 % Trigger a manual reschedule. Used for testing and/or ops.
 reschedule() ->
     gen_server:call(?MODULE, reschedule).
+
+
+-spec rep_state(rep_id()) -> #rep{} | nil.
+rep_state(RepId) ->
+    case (catch ets:lookup_element(?MODULE, RepId, #job.rep)) of
+        {'EXIT',{badarg, _}} ->
+            nil;
+        Rep ->
+            Rep
+    end.
+
+-spec find_jobs_by_dbname(binary()) -> list(#rep{}).
+find_jobs_by_dbname(DbName) ->
+    Rep = #rep{db_name = DbName, _ = '_'},
+    MatchSpec = #job{id = '$1', rep = Rep, _ = '_'},
+    [RepId || [RepId] <- ets:match(?MODULE, MatchSpec)].
+
+
+-spec find_jobs_by_doc(binary(), binary()) -> list(#rep{}).
+find_jobs_by_doc(DbName, DocId) ->
+    Rep =  #rep{db_name = DbName, doc_id = DocId, _ = '_'},
+    MatchSpec = #job{id = '$1', rep = Rep, _ = '_'},
+    [RepId || [RepId] <- ets:match(?MODULE, MatchSpec)].
+
+
+
 
 %% gen_server functions
 
