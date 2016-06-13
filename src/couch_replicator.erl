@@ -13,6 +13,7 @@
 -module(couch_replicator).
 
 -export([replicate/2, ensure_rep_db_exists/0]).
+-export([rep_state/1]).
 
 -include_lib("couch/include/couch_db.hrl").
 -include("couch_replicator.hrl").
@@ -101,7 +102,7 @@ wait_for_result(RepId) ->
 cancel_replication({BasedId, Extension} = RepId) ->
     FullRepId = BasedId ++ Extension,
     couch_log:notice("Canceling replication '~s' ...", [FullRepId]),
-    case couch_replicator_scheduler:rep_state(RepId) of
+    case rep_state(RepId) of
     #rep{} ->
         ok = couch_replicator_scheduler:remove_job(RepId),
         couch_log:notice("Replication '~s' cancelled", [FullRepId]),
@@ -119,7 +120,7 @@ cancel_replication(RepId, #user_ctx{name = Name, roles = Roles}) ->
     true ->
         cancel_replication(RepId);
     false ->
-        case couch_replicator_scheduler:rep_state(RepId) of
+        case rep_state(RepId) of
         #rep{user_ctx = #user_ctx{name = Name}} ->
             cancel_replication(RepId);
         #rep{user_ctx = #user_ctx{name = _Other}} ->
@@ -131,4 +132,12 @@ cancel_replication(RepId, #user_ctx{name = Name, roles = Roles}) ->
      end.
 
 
-
+% TODO: make this a function in couch_replicator_scheduler API
+-spec rep_state(rep_id()) -> #rep{} | nil.
+rep_state(RepId) ->
+    case (catch ets:lookup_element(couch_replicator_scheduler, RepId, 3)) of
+        {'EXIT',{badarg, _}} ->
+            nil;
+        Rep ->
+            Rep
+    end.

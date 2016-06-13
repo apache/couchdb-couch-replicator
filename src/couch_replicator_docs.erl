@@ -18,6 +18,7 @@
 -export([
     remove_state_fields/2,
     update_doc_completed/3,
+    update_doc_replication_id/3,
     update_doc_process_error/3
 ]).
 
@@ -75,6 +76,11 @@ update_doc_process_error(DbName, DocId, Error) ->
     update_rep_doc(DbName, DocId, [
         {<<"_replication_state">>, <<"failed">>},
         {<<"_replication_state_reason">>, Reason}]).
+
+
+-spec update_doc_replication_id(binary(), binary(), binary()) -> any().
+update_doc_replication_id(DbName, DocId, RepId) ->
+    update_rep_doc(DbName, DocId, [{<<"_replication_id">>, RepId}]).
 
 
 -spec ensure_rep_db_exists() -> {ok, #db{}}.

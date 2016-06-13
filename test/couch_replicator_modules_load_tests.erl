@@ -42,4 +42,4 @@ should_load_modules() ->
     [should_load_module(Mod) || Mod <- Modules].
 
 should_load_module(Mod) ->
-    {atom_to_list(Mod), ?_assertMatch({module, _}, code:ensure_loaded(Mod))}.
+    {atom_to_list(Mod), ?_assertMatch({module, _}, code:load_file(Mod))}.

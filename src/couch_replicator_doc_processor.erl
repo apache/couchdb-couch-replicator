@@ -85,9 +85,10 @@ process_update(DbName, {Change}) ->
 
 -spec maybe_start_replication(binary(), binary(), {[_]}) -> ok.
 maybe_start_replication(DbName, DocId, RepDoc) ->
-    #rep{id = RepId} = Rep0 = couch_replicator_docs:parse_rep_doc(RepDoc),
+    Rep0 = couch_replicator_docs:parse_rep_doc(RepDoc),
+    #rep{id = {BaseId, _} = RepId} = Rep0,
     Rep = Rep0#rep{db_name = DbName},
-    case couch_replicator_scheduler:rep_state(RepId) of
+    case couch_replicator:rep_state(RepId) of
     nil ->
         case couch_replicator_scheduler:add_job(Rep) of
         ok ->
@@ -112,269 +113,53 @@ maybe_start_replication(DbName, DocId, RepDoc) ->
             couch_log:warning("Replication `~s` specified by document `~s`"
                 " already started triggered by document `~s` from a different"
                 " database", [pp_rep_id(RepId), DocId, OtherDocId])
-        end
+        end,
+        maybe_tag_rep_doc(DbName, DocId, RepDoc, ?l2b(BaseId))
     end,
     ok.
 
 
+-spec maybe_tag_rep_doc(binary(), binary(), {[_]}, binary()) -> ok.
+maybe_tag_rep_doc(DbName, DocId, {RepProps}, RepId) ->
+    case get_json_value(<<"_replication_id">>, RepProps) of
+    RepId ->
+        ok;
+    _ ->
+        couch_replicator_docs:update_doc_replication_id(DbName, DocId, RepId)
+    end.
+
+
 -spec remove_jobs(binary(), binary()) -> ok.
 remove_jobs(DbName, DocId) ->
-    RepIds = couch_replicator_scheduler:find_jobs_by_doc(DbName, DocId),
-    lists:foreach(fun couch_replicator_scheduler:remove_job/1, RepIds).
+    [
+        begin
+            couch_replicator_scheduler:remove_job(RepId)
+        end || RepId <- find_jobs_by_doc(DbName, DocId)
+    ],
+    ok.
 
 
+% TODO: make this a function in couch_replicator_scheduler API
 -spec clean_up_replications(binary()) -> ok.
 clean_up_replications(DbName) ->
-    RepIds = couch_replicator_scheduler:find_jobs_by_dbname(DbName),
+    RepIds = find_jobs_by_dbname(DbName),
     lists:foreach(fun couch_replicator_scheduler:remove_job/1, RepIds).
 
 
-
--ifdef(TEST).
-
--include_lib("eunit/include/eunit.hrl").
-
--define(DB, <<"db">>).
--define(DOC1, <<"doc1">>).
--define(DOC2, <<"doc2">>).
--define(R1, {"1", ""}).
--define(R2, {"2", ""}).
+% TODO: make this a function in couch_replicator_scheduler API
+-spec find_jobs_by_dbname(binary()) -> list(#rep{}).
+find_jobs_by_dbname(DbName) ->
+    RepSpec = #rep{db_name = DbName, _ = '_'},
+    MatchSpec = {job, '$1', RepSpec, '_', '_'},
+    [RepId || [RepId] <- ets:match(couch_replicator_scheduler, MatchSpec)].
 
 
-doc_processor_test_() ->
-    {
-        foreach,
-        fun setup/0,
-        fun teardown/1,
-        [
-            t_bad_change(),
-            t_regular_change(),
-            t_deleted_change(),
-            t_triggered_change(),
-            t_completed_change(),
-            t_error_change(),
-            t_failed_change(),
-            t_change_for_different_node(),
-            t_change_when_cluster_unstable(),
-            t_already_running_same_docid(),
-            t_already_running_transient(),
-            t_already_running_other_db_other_doc()
-        ]
-    }.
-
-
-% Can't parse replication doc, so should write failure state to document.
-t_bad_change() ->
-    ?_test(begin
-        meck:expect(couch_replicator_docs, parse_rep_doc,
-            fun(_) -> throw({bad_rep_doc, <<"bad">>}) end),
-        ?assertEqual(acc, db_change(?DB, bad_change(), acc)),
-        ?assert(updated_doc_with_failed_state())
-    end).
-
-
-% Regular change, parse to a #rep{} and then add job.
-t_regular_change() ->
-    ?_test(begin
-        ?assertEqual(ok, process_update(?DB, change())),
-        ?assert(added_job())
-    end).
-
-
-% Change is a deletion, and job is running, so remove job.
-t_deleted_change() ->
-    ?_test(begin
-        meck:expect(couch_replicator_scheduler, find_jobs_by_doc,
-            fun(?DB, ?DOC1) -> [#rep{id = ?R2}] end),
-        ?assertEqual(ok, process_update(?DB, deleted_change())),
-        ?assert(removed_job(?R2))
-    end).
-
-
-% Change is in `triggered` state. Remove legacy state and add job.
-t_triggered_change() ->
-    ?_test(begin
-        ?assertEqual(ok, process_update(?DB, change(<<"triggered">>))),
-        ?assert(removed_state_fields()),
-        ?assert(added_job())
-    end).
-
-% Change is in `completed` state, so skip over it.
-t_completed_change() ->
-    ?_test(begin
-        ?assertEqual(ok, process_update(?DB, change(<<"completed">>))),
-        ?assert(did_not_remove_state_fields()),
-        ?assert(did_not_add_job())
-    end).
-
-
-% Change is in `error` state. Remove legacy state and retry
-% running the job. This state was used for transient erorrs which are not
-% written to the document anymore.
-t_error_change() ->
-    ?_test(begin
-        ?assertEqual(ok, process_update(?DB, change(<<"error">>))),
-        ?assert(removed_state_fields()),
-        ?assert(added_job())
-    end).
-
-
-% Change is in `failed` state. This is a terminal state and it will not
-% be tried again, so skip over it.
-t_failed_change() ->
-    ?_test(begin
-        ?assertEqual(ok, process_update(?DB, change(<<"failed">>))),
-        ?assert(did_not_add_job())
-    end).
-
-
-% Normal change, but according to cluster ownership algorithm, replication belongs to
-% a different node, so this node should skip it.
-t_change_for_different_node() ->
-   ?_test(begin
-        meck:expect(couch_replicator_clustering, owner, 2, different_node),
-        ?assertEqual(ok, process_update(?DB, change())),
-        ?assert(did_not_add_job())
-   end).
-
-
-% Change handled when cluster is unstable (nodes are added or removed), so
-% job is not added. A rescan will be triggered soon and change will be evaluated again.
-t_change_when_cluster_unstable() ->
-   ?_test(begin
-       meck:expect(couch_replicator_clustering, owner, 2, unstable),
-       ?assertEqual(ok, process_update(?DB, change())),
-       ?assert(did_not_add_job())
-   end).
-
-
-% Replication is already running, with same doc id. Ignore change.
-t_already_running_same_docid() ->
-   ?_test(begin
-       mock_already_running(?DB, ?DOC1),
-       ?assertEqual(ok, process_update(?DB, change())),
-       ?assert(did_not_add_job())
-   end).
-
-
-% There is a transient replication with same replication id running. Ignore change.
-t_already_running_transient() ->
-   ?_test(begin
-       mock_already_running(null, null),
-       ?assertEqual(ok, process_update(?DB, change())),
-       ?assert(did_not_add_job())
-   end).
-
-
-% There is a duplicate replication potentially from a different db and/or doc.
-% Ignore this change and let other replication job continue.
-t_already_running_other_db_other_doc() ->
-   ?_test(begin
-       mock_already_running(<<"otherdb">>, ?DOC2),
-       ?assertEqual(ok, process_update(?DB, change())),
-       ?assert(did_not_add_job())
-   end).
+% TODO: make this a function in couch_replicator_scheduler API
+-spec find_jobs_by_doc(binary(), binary()) -> list(#rep{}).
+find_jobs_by_doc(DbName, DocId) ->
+    RepSpec =  #rep{db_name = DbName, doc_id = DocId, _ = '_'},
+    MatchSpec = {job, '$1', RepSpec, '_', '_'},
+    [RepId || [RepId] <- ets:match(couch_replicator_scheduler, MatchSpec)].
 
 
 
-% Test helper functions
-
-
-setup() ->
-    meck:expect(couch_log, info, 2, ok),
-    meck:expect(couch_log, notice, 2, ok),
-    meck:expect(couch_log, warning, 2, ok),
-    meck:expect(couch_log, error, 2, ok),
-    meck:expect(couch_replicator_clustering, owner, 2, node()),
-    meck:expect(couch_replicator_scheduler, remove_job, 1, ok),
-    meck:expect(couch_replicator_scheduler, add_job, 1, ok),
-    meck:expect(couch_replicator_docs, remove_state_fields, 2, ok),
-    meck:expect(couch_replicator_docs, update_doc_process_error, 3, ok),
-    meck:expect(couch_replicator_docs, parse_rep_doc,
-        fun({DocProps}) ->
-            #rep{id = ?R1, doc_id = get_json_value(<<"_id">>, DocProps)}
-        end).
-
-
-teardown(_) ->
-    meck:unload().
-
-
-mock_already_running(DbName, DocId) ->
-    meck:expect(couch_replicator_scheduler, rep_state,
-         fun(RepId) -> #rep{id = RepId, doc_id = DocId, db_name = DbName} end).
-
-
-removed_state_fields() ->
-    meck:called(couch_replicator_docs, remove_state_fields, [?DB, ?DOC1]).
-
-
-added_job() ->
-    meck:called(couch_replicator_scheduler, add_job, [
-        #rep{id = ?R1, db_name = ?DB, doc_id = ?DOC1}]).
-
-
-removed_job(Id) ->
-    meck:called(couch_replicator_scheduler, remove_job, [#rep{id = Id}]).
-
-
-did_not_remove_state_fields() ->
-    0 == meck:num_calls(couch_replicator_docs, remove_state_fields, '_').
-
-
-did_not_add_job() ->
-    0 == meck:num_calls(couch_replicator_scheduler, add_job, '_').
-
-
-updated_doc_with_failed_state() ->
-    1 == meck:num_calls(couch_replicator_docs, update_doc_process_error, '_').
-
-
-change() ->
-    {[
-        {<<"id">>, ?DOC1},
-        {doc, {[
-            {<<"_id">>, ?DOC1},
-            {<<"source">>, <<"src">>},
-            {<<"target">>, <<"tgt">>}
-        ]}}
-    ]}.
-
-
-change(State) ->
-    {[
-        {<<"id">>, ?DOC1},
-        {doc, {[
-            {<<"_id">>, ?DOC1},
-            {<<"source">>, <<"src">>},
-            {<<"target">>, <<"tgt">>},
-            {<<"_replication_state">>, State}
-        ]}}
-    ]}.
-
-
-deleted_change() ->
-    {[
-        {<<"id">>, ?DOC1},
-        {<<"deleted">>, true},
-        {doc, {[
-            {<<"_id">>, ?DOC1},
-            {<<"source">>, <<"src">>},
-            {<<"target">>, <<"tgt">>}
-        ]}}
-    ]}.
-
-
-bad_change() ->
-    {[
-        {<<"id">>, ?DOC2},
-        {doc, {[
-            {<<"_id">>, ?DOC2},
-            {<<"source">>, <<"src">>}
-        ]}}
-    ]}.
-
-
-
-
--endif.
