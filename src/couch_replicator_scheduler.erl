@@ -17,10 +17,13 @@
 
 -include("couch_replicator_scheduler.hrl").
 -include("couch_replicator.hrl").
+-include("couch_replicator_api_wrap.hrl").
+-include_lib("couch/include/couch_db.hrl").
 
 %% public api
 -export([start_link/0, add_job/1, remove_job/1, reschedule/0]).
 -export([rep_state/1, find_jobs_by_dbname/1, find_jobs_by_doc/2]).
+-export([jobs/0]).
 
 %% gen_server callbacks
 -export([init/1, terminate/2, code_change/3]).
@@ -550,6 +553,47 @@ avg(_Sum, 0) ->
 avg(Sum, N) when N > 0 ->
     round(Sum / N).
 
+
+-spec ejson_url(#httpdb{} | binary()) -> binary().
+ejson_url(#httpdb{}=Httpdb) ->
+    couch_util:url_strip_password(Httpdb#httpdb.url);
+ejson_url(DbName) when is_binary(DbName) ->
+    DbName.
+
+
+-spec jobs() -> [[tuple()]].
+jobs() ->
+    ets:foldl(fun(Job, Acc) ->
+        Rep = Job#job.rep,
+        Source = ejson_url(Rep#rep.source),
+        Target = ejson_url(Rep#rep.target),
+        History = lists:map(fun(Event) ->
+            EventProps  = case Event of
+                {{crashed, Reason}, _When} ->
+                    [{type, crashed}, {reason, Reason}];
+                {Type, _When} ->
+                    [{type, Type}]
+            end,
+            {_Type, {_Mega, _Sec, Micros}=When} = Event,
+            {{Y, Mon, D}, {H, Min, S}} = calendar:now_to_universal_time(When),
+            ISO8601 = iolist_to_binary(io_lib:format(
+                "~B-~2..0B-~2..0BT~2..0B-~2..0B-~2..0B.~BZ",
+                [Y,Mon,D,H,Min,S,Micros]
+            )),
+            {[{timestamp, ISO8601} | EventProps]}
+        end, Job#job.history),
+        {BaseID, Ext} = Job#job.id,
+        [{[
+            {id, iolist_to_binary([BaseID, Ext])},
+            {source, iolist_to_binary(Source)},
+            {target, iolist_to_binary(Target)},
+            {database, Rep#rep.db_name},
+            {user, (Rep#rep.user_ctx)#user_ctx.name},
+            {doc_id, Rep#rep.doc_id},
+            {history, History},
+            {node, node()}
+        ]} | Acc]
+    end, [], couch_replicator_scheduler).
 
 
 -ifdef(TEST).
