@@ -188,12 +188,10 @@ handle_info({'DOWN', _Ref, process, Pid, normal}, State) ->
     {noreply, State};
 
 handle_info({'DOWN', _Ref, process, Pid, Reason}, State) ->
-    {ok, Job0} = job_by_pid(Pid),
+    {ok, Job} = job_by_pid(Pid),
     couch_log:notice("~p: Job ~p died with reason: ~p",
-        [?MODULE, Job0#job.id, Reason]),
-    Job1 = update_history(Job0#job{pid = undefined, monitor = undefined},
-        {crashed, Reason}, os:timestamp(), State),
-    true = ets:insert(?MODULE, Job1),
+        [?MODULE, Job#job.id, Reason]),
+    ok = update_state_crashed(Job, Reason, State),
     start_pending_jobs(State),
     {noreply, State};
 
@@ -306,18 +304,22 @@ add_job_int(#job{} = Job) ->
 start_job_int(#job{pid = Pid}, _State) when Pid /= undefined ->
     ok;
 
-start_job_int(#job{} = Job0, State) ->
-    case couch_replicator_scheduler_sup:start_child(Job0#job.rep) of
+start_job_int(#job{} = Job, State) ->
+    case couch_replicator_scheduler_sup:start_child(Job#job.rep) of
         {ok, Child} ->
             Ref = monitor(process, Child),
-            Job1 = update_history(Job0#job{pid = Child, monitor = Ref},
-                started, os:timestamp(), State),
-            true = ets:insert(?MODULE, Job1),
+            ok = update_state_started(Job, Child, Ref, State),
             couch_log:notice("~p: Job ~p started as ~p",
-                [?MODULE, Job1#job.id, Job1#job.pid]);
+                [?MODULE, Job#job.id, Job#job.pid]);
+        {error, {already_started, OtherPid}} ->
+            couch_log:notice("~p: Job ~p already running as ~p. Most likely"
+                " because a duplicate replication is running on another node",
+                [?MODULE, Job#job.id, OtherPid]),
+            ok = update_state_crashed(Job, "Duplicate replication running", State);
         {error, Reason} ->
             couch_log:notice("~p: Job ~p failed to start for reason ~p",
-                [?MODULE, Job0, Reason])
+                [?MODULE, Job, Reason]),
+            ok = update_state_crashed(Job, Reason, State)
     end.
 
 
@@ -325,14 +327,12 @@ start_job_int(#job{} = Job0, State) ->
 stop_job_int(#job{pid = undefined}, _State) ->
     ok;
 
-stop_job_int(#job{} = Job0, State) ->
-    ok = couch_replicator_scheduler_sup:terminate_child(Job0#job.pid),
-    demonitor(Job0#job.monitor, [flush]),
-    Job1 = update_history(Job0#job{pid = undefined, monitor = undefined},
-        stopped, os:timestamp(), State),
-    true = ets:insert(?MODULE, Job1),
+stop_job_int(#job{} = Job, State) ->
+    ok = couch_replicator_scheduler_sup:terminate_child(Job#job.pid),
+    demonitor(Job#job.monitor, [flush]),
+    ok = update_state_stopped(Job, State),
     couch_log:notice("~p: Job ~p stopped as ~p",
-        [?MODULE, Job0#job.id, Job0#job.pid]).
+        [?MODULE, Job#job.id, Job#job.pid]).
 
 
 -spec remove_job_int(#job{}) -> true.
@@ -377,6 +377,40 @@ job_by_id(Id) ->
         [#job{}=Job] ->
             {ok, Job}
     end.
+
+
+-spec update_state_stopped(#job{}, #state{}) -> ok.
+update_state_stopped(Job, State) ->
+    Job1 = reset_job_process(Job),
+    Job2 = update_history(Job1, stopped, os:timestamp(), State),
+    true = ets:insert(?MODULE, Job2),
+    ok.
+
+
+-spec update_state_started(#job{}, pid(), reference(), #state{}) -> ok.
+update_state_started(Job, Pid, Ref, State) ->
+    Job1 = set_job_process(Job, Pid, Ref),
+    Job2 = update_history(Job1, started, os:timestamp(), State),
+    true = ets:insert(?MODULE, Job2),
+    ok.
+
+
+-spec update_state_crashed(#job{}, any(), #state{}) -> ok.
+update_state_crashed(Job, Reason, State) ->
+    Job1 = reset_job_process(Job),
+    Job2 = update_history(Job1, {crashed, Reason}, os:timestamp(), State),
+    true = ets:insert(?MODULE, Job2),
+    ok.
+
+
+-spec set_job_process(#job{}, pid(), reference()) -> #job{}.
+set_job_process(#job{} = Job, Pid, Ref) when is_pid(Pid), is_reference(Ref) ->
+    Job#job{pid = Pid, monitor = Ref}.
+
+
+-spec reset_job_process(#job{}) -> #job{}.
+reset_job_process(#job{} = Job) ->
+    Job#job{pid = undefined, monitor = undefined}.
 
 
 -spec reschedule(#state{}) -> ok.
