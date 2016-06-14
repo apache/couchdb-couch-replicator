@@ -18,7 +18,7 @@
 -export([
     remove_state_fields/2,
     update_doc_completed/3,
-    update_doc_process_error/3
+    update_failed/3
 ]).
 
 -define(REP_DB_NAME, <<"_replicator">>).
@@ -63,8 +63,8 @@ update_doc_completed(DbName, DocId, Stats) ->
         {<<"_replication_stats">>, {Stats}}]).
 
 
--spec update_doc_process_error(binary(), binary(), any()) -> any().
-update_doc_process_error(DbName, DocId, Error) ->
+-spec update_failed(binary(), binary(), any()) -> any().
+update_failed(DbName, DocId, Error) ->
     Reason = case Error of
         {bad_rep_doc, Reas} ->
             Reas;

@@ -45,7 +45,7 @@ db_change(DbName, {ChangeProps} = Change, Server) ->
     _Tag:Error ->
         {RepProps} = get_json_value(doc, ChangeProps),
         DocId = get_json_value(<<"_id">>, RepProps),
-        couch_replicator_docs:update_doc_process_error(DbName, DocId, Error)
+        couch_replicator_docs:update_failed(DbName, DocId, Error)
     end,
     Server.
 
@@ -59,7 +59,7 @@ process_update(DbName, {Change}) ->
     {_, true} ->
         remove_jobs(DbName, DocId);
     {unstable, false} ->
-	couch_log:notice("Not starting '~s' as cluster is unstable", [DocId]);
+        couch_log:notice("Not starting '~s' as cluster is unstable", [DocId]);
     {ThisNode, false} when ThisNode =:= node() ->
         case get_json_value(<<"_replication_state">>, RepProps) of
         undefined ->
@@ -105,13 +105,17 @@ maybe_start_replication(DbName, DocId, RepDoc) ->
     #rep{db_name = OtherDbName, doc_id = OtherDocId} ->
         case mem3:dbname(OtherDbName) =:= mem3:dbname(DbName) of
         true ->
-            couch_log:notice("Replication `~s` specified by document `~s`"
+            Msg = io_lib:format("Replication `~s` specified by document `~s`"
                 " already started, triggered by document `~s` from the same"
-                " database", [pp_rep_id(RepId), DocId, OtherDocId]);
+                " database", [pp_rep_id(RepId), DocId, OtherDocId]),
+            couch_log:notice(Msg, []),
+            couch_replicator_docs:update_failed(DbName, DocId, Msg);
         false ->
-            couch_log:warning("Replication `~s` specified by document `~s`"
+            Msg = io_lib:format("Replication `~s` specified by document `~s`"
                 " already started triggered by document `~s` from a different"
-                " database", [pp_rep_id(RepId), DocId, OtherDocId])
+                " database", [pp_rep_id(RepId), DocId, OtherDocId]),
+            couch_log:warning(Msg, []),
+            couch_replicator_docs:update_failed(DbName, DocId, Msg)
         end
     end,
     ok.
@@ -158,7 +162,8 @@ doc_processor_test_() ->
             t_change_when_cluster_unstable(),
             t_already_running_same_docid(),
             t_already_running_transient(),
-            t_already_running_other_db_other_doc()
+            t_already_running_other_db_other_doc(),
+            t_already_running_other_doc_same_db()
         ]
     }.
 
@@ -266,15 +271,25 @@ t_already_running_transient() ->
    end).
 
 
-% There is a duplicate replication potentially from a different db and/or doc.
-% Ignore this change and let other replication job continue.
+% There is a duplicate replication potentially from a different db and doc.
+% Write permanent failure to doc.
 t_already_running_other_db_other_doc() ->
    ?_test(begin
        mock_already_running(<<"otherdb">>, ?DOC2),
        ?assertEqual(ok, process_update(?DB, change())),
-       ?assert(did_not_add_job())
+       ?assert(did_not_add_job()),
+       ?assert(updated_doc_with_failed_state())
    end).
 
+% There is a duplicate replication potentially from same db and different doc.
+% Write permanent failure to doc.
+t_already_running_other_doc_same_db() ->
+   ?_test(begin
+       mock_already_running(?DB, ?DOC2),
+       ?assertEqual(ok, process_update(?DB, change())),
+       ?assert(did_not_add_job()),
+       ?assert(updated_doc_with_failed_state())
+   end).
 
 
 % Test helper functions
@@ -289,7 +304,7 @@ setup() ->
     meck:expect(couch_replicator_scheduler, remove_job, 1, ok),
     meck:expect(couch_replicator_scheduler, add_job, 1, ok),
     meck:expect(couch_replicator_docs, remove_state_fields, 2, ok),
-    meck:expect(couch_replicator_docs, update_doc_process_error, 3, ok),
+    meck:expect(couch_replicator_docs, update_failed, 3, ok),
     meck:expect(couch_replicator_docs, parse_rep_doc,
         fun({DocProps}) ->
             #rep{id = ?R1, doc_id = get_json_value(<<"_id">>, DocProps)}
@@ -327,7 +342,7 @@ did_not_add_job() ->
 
 
 updated_doc_with_failed_state() ->
-    1 == meck:num_calls(couch_replicator_docs, update_doc_process_error, '_').
+    1 == meck:num_calls(couch_replicator_docs, update_failed, '_').
 
 
 change() ->
