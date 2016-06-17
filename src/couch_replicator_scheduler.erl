@@ -31,9 +31,9 @@
 -export([handle_config_change/5, handle_config_terminate/3]).
 
 %% types
--type event_type() :: started | stopped | {crashed, any()}.
+-type event_type() :: added | started | stopped | {crashed, any()}.
 -type event() :: {Type:: event_type(), When :: erlang:timestamp()}.
--type history() :: [Events :: event()].
+-type history() :: nonempty_list(event()).
 
 %% definitions
 -define(MAX_BACKOFF_EXPONENT, 10).
@@ -51,6 +51,16 @@
           monitor :: undefined | reference(),
           history :: history()}).
 
+-record(stats_acc, {
+          now  :: erlang:timestamp(),
+          pending_t = 0 :: non_neg_integer(),
+          running_t = 0 :: non_neg_integer(),
+          crashed_t = 0 :: non_neg_integer(),
+          pending_n = 0 :: non_neg_integer(),
+          running_n = 0 :: non_neg_integer(),
+          crashed_n = 0 :: non_neg_integer()}).
+
+
 %% public functions
 
 -spec start_link() -> {ok, pid()} | ignore | {error, term()}.
@@ -63,7 +73,7 @@ add_job(#rep{} = Rep) when Rep#rep.id /= undefined ->
     Job = #job{
         id = Rep#rep.id,
         rep = Rep,
-        history = []},
+        history = [{added, os:timestamp()}]},
     gen_server:call(?MODULE, {add_job, Job}).
 
 
@@ -128,12 +138,17 @@ handle_call({add_job, Job}, _From, State) ->
         true ->
             case running_job_count() of
                 RunningJobs when RunningJobs < State#state.max_jobs ->
-                    start_job_int(Job, State);
+                    start_job_int(Job, State),
+                    update_running_jobs_stats();
                 _ ->
                     ok
                 end,
+            couch_stats:increment_counter([couch_replicator, jobs, adds]),
+            TotalJobs = ets:info(?MODULE, size),
+            couch_stats:update_gauge([couch_replicator, jobs, total], TotalJobs),
             {reply, ok, State};
         false ->
+            couch_stats:increment_counter([couch_replicator, jobs, duplicate_adds]),
             {reply, {error, already_added}, State}
     end;
 
@@ -142,6 +157,10 @@ handle_call({remove_job, Id}, _From, State) ->
         {ok, Job} ->
             ok = stop_job_int(Job, State),
             true = remove_job_int(Job),
+            couch_stats:increment_counter([couch_replicator, jobs, removes]),
+            TotalJobs = ets:info(?MODULE, size),
+            couch_stats:update_gauge([couch_replicator, jobs, total], TotalJobs),
+            update_running_jobs_stats(),
             {reply, ok, State};
         {error, not_found} ->
             {reply, ok, State}
@@ -185,6 +204,7 @@ handle_info({'DOWN', _Ref, process, Pid, normal}, State) ->
     {ok, Job} = job_by_pid(Pid),
     couch_log:notice("~p: Job ~p completed normally", [?MODULE, Job#job.id]),
     remove_job_int(Job),
+    update_running_jobs_stats(),
     {noreply, State};
 
 handle_info({'DOWN', _Ref, process, Pid, Reason}, State) ->
@@ -193,6 +213,7 @@ handle_info({'DOWN', _Ref, process, Pid, Reason}, State) ->
         [?MODULE, Job#job.id, Reason]),
     ok = update_state_crashed(Job, Reason, State),
     start_pending_jobs(State),
+    update_running_jobs_stats(),
     {noreply, State};
 
 handle_info(_, State) ->
@@ -270,7 +291,7 @@ oldest_job_first(#job{} = A, #job{} = B) ->
 
 not_recently_crashed(#job{} = Job) ->
     case Job#job.history of
-        [] ->
+        [{added, _When}] ->
             true;
         [{stopped, _When} | _] ->
             true;
@@ -384,6 +405,7 @@ update_state_stopped(Job, State) ->
     Job1 = reset_job_process(Job),
     Job2 = update_history(Job1, stopped, os:timestamp(), State),
     true = ets:insert(?MODULE, Job2),
+    couch_stats:increment_counter([couch_replicator, jobs, stops]),
     ok.
 
 
@@ -392,6 +414,7 @@ update_state_started(Job, Pid, Ref, State) ->
     Job1 = set_job_process(Job, Pid, Ref),
     Job2 = update_history(Job1, started, os:timestamp(), State),
     true = ets:insert(?MODULE, Job2),
+    couch_stats:increment_counter([couch_replicator, jobs, starts]),
     ok.
 
 
@@ -400,6 +423,7 @@ update_state_crashed(Job, Reason, State) ->
     Job1 = reset_job_process(Job),
     Job2 = update_history(Job1, {crashed, Reason}, os:timestamp(), State),
     true = ets:insert(?MODULE, Job2),
+    couch_stats:increment_counter([couch_replicator, jobs, crashes]),
     ok.
 
 
@@ -419,7 +443,9 @@ reschedule(State) ->
     Pending = pending_job_count(),
     stop_excess_jobs(State, Running),
     start_pending_jobs(State, Running, Pending),
-    rotate_jobs(State, Running, Pending).
+    rotate_jobs(State, Running, Pending),
+    update_running_jobs_stats(),
+    ok.
 
 
 stop_excess_jobs(State, Running) ->
@@ -473,6 +499,61 @@ update_history(Job, Type, When, State) ->
     Job#job{history = History1}.
 
 
+-spec update_running_jobs_stats() -> ok.
+update_running_jobs_stats() ->
+    Acc0 = #stats_acc{now = os:timestamp()},
+    AccR = ets:foldl(fun stats_fold/2, Acc0, ?MODULE),
+    #stats_acc{
+        pending_t = PendingSum,
+        running_t = RunningSum,
+        crashed_t = CrashedSum,
+        pending_n = PendingN,
+        running_n = RunningN,
+        crashed_n = CrashedN
+    } = AccR,
+    PendingAvg = avg(PendingSum, PendingN),
+    RunningAvg = avg(RunningSum, RunningN),
+    CrashedAvg = avg(CrashedSum, CrashedN),
+    couch_stats:update_gauge([couch_replicator, jobs, pending], PendingN),
+    couch_stats:update_gauge([couch_replicator, jobs, running], RunningN),
+    couch_stats:update_gauge([couch_replicator, jobs, crashed], CrashedN),
+    couch_stats:update_gauge([couch_replicator, jobs, avg_pending], PendingAvg),
+    couch_stats:update_gauge([couch_replicator, jobs, avg_running], RunningAvg),
+    couch_stats:update_gauge([couch_replicator, jobs, avg_crashed], CrashedAvg),
+    ok.
+
+
+-spec stats_fold(#job{}, #stats_acc{}) -> #stats_acc{}.
+stats_fold(#job{pid = undefined, history = [{added, T}]}, Acc) ->
+    #stats_acc{now = Now, pending_t = SumT, pending_n = Cnt} = Acc,
+    Dt = round(timer:now_diff(Now, T) / 1000000),
+    Acc#stats_acc{pending_t = SumT + Dt, pending_n = Cnt + 1};
+
+stats_fold(#job{pid = undefined, history = [{stopped, T} | _]}, Acc) ->
+    #stats_acc{now = Now, pending_t = SumT, pending_n = Cnt} = Acc,
+    Dt = round(timer:now_diff(Now, T) / 1000000),
+    Acc#stats_acc{pending_t = SumT + Dt, pending_n = Cnt + 1};
+
+stats_fold(#job{pid = undefined, history = [{{crashed, _}, T} | _]}, Acc) ->
+    #stats_acc{now = Now, crashed_t = SumT, crashed_n = Cnt} = Acc,
+    Dt = round(timer:now_diff(Now, T) / 1000000),
+    Acc#stats_acc{crashed_t = SumT + Dt, crashed_n = Cnt + 1};
+
+stats_fold(#job{pid = P, history = [{started, T} | _]}, Acc) when is_pid(P) ->
+    #stats_acc{now = Now, running_t = SumT, running_n = Cnt} = Acc,
+    Dt = round(timer:now_diff(Now, T) / 1000000),
+    Acc#stats_acc{running_t = SumT + Dt, running_n = Cnt + 1}.
+
+
+
+-spec avg(Sum :: non_neg_integer(), N :: non_neg_integer())  -> non_neg_integer().
+avg(_Sum, 0) ->
+    0;
+
+avg(Sum, N) when N > 0 ->
+    round(Sum / N).
+
+
 
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
@@ -488,10 +569,11 @@ backoff_micros_test_() ->
 
 crashes_before_stop_test_() ->
     [?_assertEqual(R, crashes_before_stop(job(H))) || {R, H} <- [
-        {[], []},
+        {[], [added()]},
         {[], [stopped()]},
         {[crashed()], [crashed()]},
         {[crashed()], [started(), crashed()]},
+        {[crashed()], [added(), started(), crashed()]},
         {[crashed(3), crashed(1)], [crashed(3), started(2), crashed(1)]},
         {[], [stopped(), crashed()]},
         {[crashed(3)], [crashed(3), stopped(2), crashed(1)]}
@@ -500,9 +582,10 @@ crashes_before_stop_test_() ->
 
 last_started_test_() ->
     [?_assertEqual({0, R, 0}, last_started(job(H))) || {R, H} <- [
-         {0, []},
+         {0, [added()]},
          {0, [crashed(1)]},
          {1, [started(1)]},
+         {1, [added(), started(1)]},
          {2, [started(2), started(1)]},
          {2, [crashed(3), started(2), started(1)]}
     ]].
@@ -510,7 +593,7 @@ last_started_test_() ->
 
 not_recently_crashed_test_() ->
     [?_assertEqual(R, not_recently_crashed(job(H))) || {R, H} <- [
-        {true, []},
+        {true, [added()]},
         {true, [stopped()]},
         {true, [crashed(0)]},
         {false, [crashed(os:timestamp())]},
@@ -561,6 +644,8 @@ stopped() ->
 stopped(WhenSec) ->
     {stopped, {0, WhenSec, 0}}.
 
+added() ->
+    {added, {0, 0, 0}}.
 
 -endif.
 

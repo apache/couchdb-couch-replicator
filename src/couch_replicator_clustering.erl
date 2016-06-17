@@ -93,6 +93,7 @@ init([]) ->
     StartPeriod = abs(config:get_integer("replicator", "cluster_start_period",
         ?DEFAULT_START_PERIOD)),
     couch_log:debug("Initialized clustering gen_server ~w", [self()]),
+    couch_stats:update_gauge([couch_replicator, cluster_is_stable], 0),
     {ok, #state{
         start_time = os:timestamp(),
         last_change = os:timestamp(),
@@ -114,12 +115,14 @@ handle_cast({set_period, QuietPeriod}, State) when
 handle_info({nodeup, Node}, State) ->
     Timer = new_timer(interval(State)),
     couch_replicator_notifier:notify({cluster, unstable}),
+    couch_stats:update_gauge([couch_replicator, cluster_is_stable], 0),
     couch_log:notice("~s : nodeup ~s, cluster unstable", [?MODULE, Node]),
     {noreply, State#state{last_change = os:timestamp(), timer = Timer}};
 
 handle_info({nodedown, Node}, State) ->
     Timer = new_timer(interval(State)),
     couch_replicator_notifier:notify({cluster, unstable}),
+    couch_stats:update_gauge([couch_replicator, cluster_is_stable], 0),
     couch_log:notice("~s : nodedown ~s, cluster unstable", [?MODULE, Node]),
     {noreply, State#state{last_change = os:timestamp(), timer = Timer}};
 
@@ -128,6 +131,7 @@ handle_info(stability_check, State) ->
    case is_stable(State) of
        true ->
 	   couch_replicator_notifier:notify({cluster, stable}),
+           couch_stats:update_gauge([couch_replicator, cluster_is_stable], 1),
            couch_log:notice("~s : publishing cluster `stable` event", [?MODULE]),
            {noreply, State};
        false ->

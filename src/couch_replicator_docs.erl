@@ -60,7 +60,8 @@ update_doc_completed(DbName, DocId, Stats) ->
     update_rep_doc(DbName, DocId, [
         {<<"_replication_state">>, <<"completed">>},
         {<<"_replication_state_reason">>, undefined},
-        {<<"_replication_stats">>, {Stats}}]).
+        {<<"_replication_stats">>, {Stats}}]),
+    couch_stats:increment_counter([couch_replicator, docs, completed_state_updates]).
 
 
 -spec update_failed(binary(), binary(), any()) -> any().
@@ -74,7 +75,8 @@ update_failed(DbName, DocId, Error) ->
     couch_log:error("Error processing replication doc `~s`: ~s", [DocId, Reason]),
     update_rep_doc(DbName, DocId, [
         {<<"_replication_state">>, <<"failed">>},
-        {<<"_replication_state_reason">>, Reason}]).
+        {<<"_replication_state_reason">>, Reason}]),
+   couch_stats:increment_counter([couch_replicator, docs, failed_state_updates]).
 
 
 -spec ensure_rep_db_exists() -> {ok, #db{}}.

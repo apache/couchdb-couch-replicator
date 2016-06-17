@@ -71,6 +71,7 @@ restart_mdb_changes(#state{mdb_changes = nil} = State) ->
     CallbackMod = couch_replicator_doc_processor,
     Options = [skip_ddocs],
     {ok, Pid} = couch_multidb_changes:start_link(Suffix, CallbackMod, nil, Options),
+    couch_stats:increment_counter([couch_replicator, db_scans]),
     couch_log:notice("Started replicator db changes listener ~p", [Pid]),
     State#state{mdb_changes = Pid};
 

@@ -27,18 +27,22 @@
 
 
 db_created(DbName, Server) ->
+    couch_stats:increment_counter([couch_replicator, docs, dbs_created]),
     couch_replicator_docs:ensure_rep_ddoc_exists(DbName),
     Server.
 
 db_deleted(DbName, Server) ->
+    couch_stats:increment_counter([couch_replicator, docs, dbs_deleted]),
     clean_up_replications(DbName),
     Server.
 
 db_found(DbName, Server) ->
+    couch_stats:increment_counter([couch_replicator, docs, dbs_found]),
     couch_replicator_docs:ensure_rep_ddoc_exists(DbName),
     Server.
 
 db_change(DbName, {ChangeProps} = Change, Server) ->
+    couch_stats:increment_counter([couch_replicator, docs, db_changes]),
     try
         ok = process_update(DbName, Change)
     catch
