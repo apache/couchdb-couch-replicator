@@ -129,6 +129,3 @@ cancel_replication(RepId, #user_ctx{name = Name, roles = Roles}) ->
             {error, not_found}
         end
      end.
-
-
-

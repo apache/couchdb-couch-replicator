@@ -95,10 +95,10 @@ ensure_rep_db_exists() ->
 -spec ensure_rep_ddoc_exists(binary()) -> ok.
 ensure_rep_ddoc_exists(RepDb) ->
     case mem3:belongs(RepDb, ?REP_DESIGN_DOC) of
-	true ->
-	    ensure_rep_ddoc_exists(RepDb, ?REP_DESIGN_DOC);
-	false ->
-	    ok
+        true ->
+            ensure_rep_ddoc_exists(RepDb, ?REP_DESIGN_DOC);
+        false ->
+            ok
     end.
 
 -spec ensure_rep_ddoc_exists(binary(), binary()) -> ok.
@@ -571,5 +571,3 @@ check_options_fail_values_test() ->
         check_options([{doc_ids, x}, {selector, y}, {filter, z}])).
 
 -endif.
-
-

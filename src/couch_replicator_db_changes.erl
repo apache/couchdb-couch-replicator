@@ -42,8 +42,12 @@ init([]) ->
     end.
 
 
+terminate(_Reason, _State) ->
+    ok.
+
+
 handle_call(_Msg, _From, State) ->
-    {noreply, State}.
+    {reply, {error, invalid_call}, State}.
 
 
 handle_cast({cluster, unstable}, State) ->
@@ -55,10 +59,6 @@ handle_cast({cluster, stable}, State) ->
 
 handle_info(_Msg, State) ->
     {noreply, State}.
-
-
-terminate(_Reason, _State) ->
-    ok.
 
 
 code_change(_OldVsn, State, _Extra) ->
@@ -99,5 +99,3 @@ start_link_cluster_event_listener() ->
         end,
     {ok, Pid} = couch_replicator_notifier:start_link(CallbackFun),
     Pid.
-
-

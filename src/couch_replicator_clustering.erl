@@ -103,6 +103,10 @@ init([]) ->
     }}.
 
 
+terminate(_Reason, _State) ->
+    ok.
+
+
 handle_call(is_stable, _From, State) ->
     {reply, is_stable(State), State}.
 
@@ -130,21 +134,18 @@ handle_info(stability_check, State) ->
    timer:cancel(State#state.timer),
    case is_stable(State) of
        true ->
-	   couch_replicator_notifier:notify({cluster, stable}),
+           couch_replicator_notifier:notify({cluster, stable}),
            couch_stats:update_gauge([couch_replicator, cluster_is_stable], 1),
            couch_log:notice("~s : publishing cluster `stable` event", [?MODULE]),
            {noreply, State};
        false ->
-	   Timer = new_timer(interval(State)),
-	   {noreply, State#state{timer = Timer}}
+           Timer = new_timer(interval(State)),
+           {noreply, State#state{timer = Timer}}
    end.
+
 
 code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
-
-
-terminate(_Reason, _State) ->
-    ok.
 
 
 %% Internal functions
@@ -202,5 +203,3 @@ owner_int(DbName, DocId) ->
     Nodes = [N || #shard{node=N} <- mem3:shards(mem3:dbname(DbName), DocId),
                   lists:member(N, Live)],
     hd(mem3_util:rotate_list({DbName, DocId}, lists:sort(Nodes))).
-
-

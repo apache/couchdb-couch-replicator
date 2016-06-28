@@ -88,6 +88,10 @@ init([DbSuffix, Module, Context, Opts]) ->
     }}.
 
 
+terminate(_Reason, _State) ->
+    ok.
+
+
 handle_call({change, DbName, Change}, _From,
     #state{skip_ddocs=SkipDDocs, mod=Mod, ctx=Ctx} = State) ->
     case {SkipDDocs, is_design_doc(Change)} of
@@ -177,8 +181,6 @@ handle_info({'EXIT', From, Reason}, #state{pids = Pids} = State) ->
             {stop, {unexpected_exit, From, Reason}, State}
     end.
 
-terminate(_Reason, _State) ->
-    ok.
 
 code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
@@ -194,11 +196,11 @@ changes_reader(Server, DbName, Since) ->
     {ok, Db} = couch_db:open_int(DbName, [?CTX, sys_db]),
     ChFun = couch_changes:handle_db_changes(
         #changes_args{
-	    include_docs = true,
-	    since = Since,
-	    feed = "normal",
-	    timeout = infinity
-	}, {json_req, null}, Db),
+            include_docs = true,
+            since = Since,
+            feed = "normal",
+            timeout = infinity
+        }, {json_req, null}, Db),
     ChFun({fun ?MODULE:changes_reader_cb/3, {Server, DbName}}).
 
 
@@ -221,10 +223,10 @@ start_event_listener(DbSuffix) ->
 
 handle_db_event(DbName, created, {Server, DbSuffix}) ->
     case DbSuffix =:= couch_db:dbname_suffix(DbName) of
-	true ->
-	    ok = gen_server:call(Server, {created, DbName});
-	_ ->
-	    ok
+        true ->
+            ok = gen_server:call(Server, {created, DbName});
+        _ ->
+            ok
     end,
     {ok, {Server, DbSuffix}};
 
@@ -240,7 +242,7 @@ handle_db_event(DbName, deleted, {Server, DbSuffix}) ->
 handle_db_event(DbName, updated, {Server, DbSuffix}) ->
     case DbSuffix =:= couch_db:dbname_suffix(DbName) of
         true ->
-	    ok = gen_server:cast(Server, {resume_scan, DbName});
+            ok = gen_server:cast(Server, {resume_scan, DbName});
         _ ->
             ok
     end,
@@ -256,16 +258,16 @@ scan_all_dbs(Server, DbSuffix) when is_pid(Server) ->
     Pat = io_lib:format("~s(\\.[0-9]{10,})?.couch$", [DbSuffix]),
     filelib:fold_files(Root, lists:flatten(Pat), true,
         fun(Filename, _) ->
-	    % shamelessly stolen from couch_server.erl
+            % shamelessly stolen from couch_server.erl
             NormFilename = couch_util:normpath(Filename),
             case NormFilename -- NormRoot of
                 [$/ | RelativeFilename] -> ok;
                 RelativeFilename -> ok
             end,
             DbName = ?l2b(filename:rootname(RelativeFilename, ".couch")),
-	    gen_server:cast(Server, {resume_scan, DbName}),
-	    ok
-	end, ok).
+            gen_server:cast(Server, {resume_scan, DbName}),
+            ok
+        end, ok).
 
 
 is_design_doc({Change}) ->
@@ -684,12 +686,14 @@ mock_logs() ->
     meck:expect(couch_log, info, 2, ok),
     meck:expect(couch_log, debug, 2, ok).
 
+
 mock_callback_mod() ->
     meck:new(?MOD, [non_strict]),
     meck:expect(?MOD, db_created, fun(_DbName, Ctx) -> Ctx end),
     meck:expect(?MOD, db_deleted, fun(_DbName, Ctx) -> Ctx end),
     meck:expect(?MOD, db_found, fun(_DbName, Ctx) -> Ctx end),
     meck:expect(?MOD, db_change, fun(_DbName, _Change, Ctx) -> Ctx end).
+
 
 mock_changes_reader_loop({_CbFun, {Server, DbName}}) ->
     receive
