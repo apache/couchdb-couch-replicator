@@ -19,7 +19,6 @@
 -export([code_change/3, terminate/2]).
 
 -export([changes_reader/3, changes_reader_cb/3]).
--export([handle_db_event/3]).
 
 -include_lib("couch/include/couch_db.hrl").
 
@@ -31,7 +30,7 @@
     mod :: atom(),
     ctx :: term(),
     suffix :: binary(),
-    event_listener :: pid(),
+    event_server :: reference(),
     scanner :: nil | pid(),
     pids :: [{binary(),pid()}],
     skip_ddocs :: boolean()
@@ -81,7 +80,7 @@ init([DbSuffix, Module, Context, Opts]) ->
         mod = Module,
         ctx = Context,
         suffix = DbSuffix,
-        event_listener = start_event_listener(DbSuffix),
+        event_server = register_with_event_server(Server),
         scanner = spawn_link(fun() -> scan_all_dbs(Server, DbSuffix) end),
         pids = [],
         skip_ddocs = proplists:is_defined(skip_ddocs, Opts)
@@ -101,12 +100,6 @@ handle_call({change, DbName, Change}, _From,
             {reply, ok, State#state{ctx=Mod:db_change(DbName, Change, Ctx)}}
     end;
 
-handle_call({created, DbName}, _From, #state{mod=Mod, ctx=Ctx} = State) ->
-    {reply, ok, State#state{ctx=Mod:db_created(DbName, Ctx)}};
-
-handle_call({deleted, DbName}, _From, #state{mod=Mod, ctx=Ctx} = State) ->
-    {reply, ok, State#state{ctx=Mod:db_deleted(DbName, Ctx)}};
-
 handle_call({checkpoint, DbName, EndSeq}, _From, #state{tid=Ets} = State) ->
     case ets:lookup(Ets, DbName) of
         [] ->
@@ -117,8 +110,84 @@ handle_call({checkpoint, DbName, EndSeq}, _From, #state{tid=Ets} = State) ->
     {reply, ok, State}.
 
 
-handle_cast({resume_scan, DbName}, #state{pids=Pids, tid=Ets} = State) ->
-    {noreply, case {lists:keyfind(DbName, 1, Pids), ets:lookup(Ets, DbName)} of
+handle_cast({resume_scan, DbName}, State) ->
+    {noreply, resume_scan(DbName, State)}.
+
+
+handle_info({'$couch_event', DbName, Event}, #state{suffix = Suf} = State) ->
+    case Suf =:= couch_db:dbname_suffix(DbName) of
+        true ->
+            {noreply, db_callback(Event, DbName, State)};
+        _ ->
+            {noreply, State}
+    end;
+
+handle_info({'DOWN', Ref, _, _, Info}, #state{event_server = Ref} = State) ->
+    {stop, {couch_event_server_died, Info}, State};
+
+handle_info({'EXIT', From, normal}, #state{scanner = From} = State) ->
+    {noreply, State#state{scanner=nil}};
+
+handle_info({'EXIT', From, Reason}, #state{scanner = From} = State) ->
+    {stop, {scanner_died, Reason}, State};
+
+handle_info({'EXIT', From, Reason}, #state{pids = Pids} = State) ->
+    couch_log:info("~p change feed exited ~p",[State#state.suffix, From]),
+    case lists:keytake(From, 2, Pids) of
+        {value, {DbName, From}, NewPids} ->
+            if Reason == normal -> ok; true ->
+                Fmt = "~s : Known change feed ~w died :: ~w",
+                couch_log:error(Fmt, [?MODULE, From, Reason])
+            end,
+            NewState = State#state{pids = NewPids},
+            case ets:lookup(State#state.tid, DbName) of
+                [{DbName, _EndSeq, true}] ->
+                    {noreply, resume_scan(DbName, NewState)};
+                _ ->
+                    {noreply, NewState}
+            end;
+        false when Reason == normal ->
+            {noreply, State};
+        false ->
+            Fmt = "~s(~p) : Unknown pid ~w died :: ~w",
+            couch_log:error(Fmt, [?MODULE, State#state.suffix, From, Reason]),
+            {stop, {unexpected_exit, From, Reason}, State}
+    end;
+
+handle_info(_Msg, State) ->
+    {noreply, State}.
+
+
+code_change(_OldVsn, State, _Extra) ->
+    {ok, State}.
+
+
+% Private functions
+
+-spec register_with_event_server(pid()) -> reference().
+register_with_event_server(Server) ->
+    Ref = erlang:monitor(process, couch_event_server),
+    couch_event:register_all(Server),
+    Ref.
+
+
+-spec db_callback(any(), atom(), #state{}) -> #state{}.
+db_callback(created, DbName, #state{mod = Mod, ctx = Ctx} = State) ->
+    State#state{ctx = Mod:db_created(DbName, Ctx)};
+
+db_callback(deleted, DbName, #state{mod = Mod, ctx = Ctx} = State) ->
+    State#state{ctx = Mod:db_deleted(DbName, Ctx)};
+
+db_callback(updated, DbName, State) ->
+    resume_scan(DbName, State);
+
+db_callback(_Other, _DbName, State) ->
+    State.
+
+
+-spec resume_scan(binary(), #state{}) -> #state{}.
+resume_scan(DbName, #state{pids=Pids, tid=Ets} = State) ->
+    case {lists:keyfind(DbName, 1, Pids), ets:lookup(Ets, DbName)} of
         {{DbName, _}, []} ->
             % Found existing change feed, but not entry in ETS
             % Flag a need to rescan from begining
@@ -145,48 +214,9 @@ handle_cast({resume_scan, DbName}, #state{pids=Pids, tid=Ets} = State) ->
             true = ets:insert(Ets, {DbName, EndSeq, false}),
             Pid = start_changes_reader(DbName, EndSeq),
             State#state{pids=[{DbName, Pid} | Pids]}
-     end}.
+     end.
 
 
-handle_info({'EXIT', From, normal}, #state{scanner = From} = State) ->
-    couch_log:debug("multidb_changes ~p scanner pid exited ~p",[State#state.suffix, From]),
-    {noreply, State#state{scanner=nil}};
-
-handle_info({'EXIT', From, Reason}, #state{scanner = From} = State) ->
-    {stop, {scanner_died, Reason}, State};
-
-handle_info({'EXIT', From, Reason}, #state{event_listener = From} = State) ->
-    {stop, {db_update_notifier_died, Reason}, State};
-
-handle_info({'EXIT', From, Reason}, #state{pids = Pids} = State) ->
-    couch_log:info("~p change feed exited ~p",[State#state.suffix, From]),
-    case lists:keytake(From, 2, Pids) of
-        {value, {DbName, From}, NewPids} ->
-            if Reason == normal -> ok; true ->
-                Fmt = "~s : Known change feed ~w died :: ~w",
-                couch_log:error(Fmt, [?MODULE, From, Reason])
-            end,
-            NewState = State#state{pids = NewPids},
-            case ets:lookup(State#state.tid, DbName) of
-                [{DbName, _EndSeq, true}] ->
-                    handle_cast({resume_scan, DbName}, NewState);
-                _ ->
-                    {noreply, NewState}
-            end;
-        false when Reason == normal ->
-            {noreply, State};
-        false ->
-            Fmt = "~s(~p) : Unknown pid ~w died :: ~w",
-            couch_log:error(Fmt, [?MODULE, State#state.suffix, From, Reason]),
-            {stop, {unexpected_exit, From, Reason}, State}
-    end.
-
-
-code_change(_OldVsn, State, _Extra) ->
-    {ok, State}.
-
-
-% Private functions
 
 start_changes_reader(DbName, Since) ->
     spawn_link(?MODULE, changes_reader, [self(), DbName, Since]).
@@ -214,42 +244,6 @@ changes_reader_cb({stop, EndSeq, _Pending}, _, {Server, DbName}) ->
 
 changes_reader_cb(_, _, Acc) ->
     Acc.
-
-
-start_event_listener(DbSuffix) ->
-    {ok, Pid} = couch_event:link_listener(
-        ?MODULE, handle_db_event, {self(), DbSuffix}, [all_dbs]),
-    Pid.
-
-handle_db_event(DbName, created, {Server, DbSuffix}) ->
-    case DbSuffix =:= couch_db:dbname_suffix(DbName) of
-        true ->
-            ok = gen_server:call(Server, {created, DbName});
-        _ ->
-            ok
-    end,
-    {ok, {Server, DbSuffix}};
-
-handle_db_event(DbName, deleted, {Server, DbSuffix}) ->
-    case DbSuffix =:= couch_db:dbname_suffix(DbName) of
-        true ->
-            ok = gen_server:call(Server, {deleted, DbName});
-        _ ->
-            ok
-    end,
-    {ok, {Server, DbSuffix}};
-
-handle_db_event(DbName, updated, {Server, DbSuffix}) ->
-    case DbSuffix =:= couch_db:dbname_suffix(DbName) of
-        true ->
-            ok = gen_server:cast(Server, {resume_scan, DbName});
-        _ ->
-            ok
-    end,
-    {ok, {Server, DbSuffix}};
-
-handle_db_event(_DbName, _Event, {Server, DbSuffix}) ->
-    {ok, {Server, DbSuffix}}.
 
 
 scan_all_dbs(Server, DbSuffix) when is_pid(Server) ->
@@ -304,13 +298,16 @@ couch_multidb_changes_test_() ->
         [
             t_handle_call_change(),
             t_handle_call_change_filter_design_docs(),
-            t_handle_call_created(),
-            t_handle_call_deleted(),
             t_handle_call_checkpoint_new(),
             t_handle_call_checkpoint_existing(),
+            t_handle_info_created(),
+            t_handle_info_deleted(),
+            t_handle_info_updated(),
+            t_handle_info_other_event(),
+            t_handle_info_created_other_db(),
             t_handle_info_scanner_exit_normal(),
             t_handle_info_scanner_crashed(),
-            t_handle_info_event_listener_exited(),
+            t_handle_info_event_server_exited(),
             t_handle_info_unknown_pid_exited(),
             t_handle_info_change_feed_exited(),
             t_handle_info_change_feed_exited_and_need_rescan(),
@@ -324,10 +321,6 @@ couch_multidb_changes_test_() ->
             t_handle_call_resume_scan_no_chfeed_ets_entry(),
             t_start_link(),
             t_start_link_no_ddocs(),
-            t_handle_db_event_created(),
-            t_handle_db_event_deleted(),
-            t_handle_db_event_updated(),
-            t_handle_db_event_other(),
             t_scanner_finds_shard(),
             t_misc_gen_server_callbacks()
         ]
@@ -336,11 +329,19 @@ couch_multidb_changes_test_() ->
 setup() ->
     mock_logs(),
     mock_callback_mod(),
-    meck:expect(couch_event, link_listener, 4, {ok, elpid}),
+    meck:expect(couch_event, register_all, 1, ok),
     meck:expect(config, get, fun("couchdb", "database_dir", _) -> ?TEMPDIR end),
-    mock_changes_reader().
+    mock_changes_reader(),
+    % create process to stand in for couch_ever_server
+    % mocking erlang:monitor doesn't, so give it real process to monitor
+    EvtPid = spawn_link(fun() -> receive looper -> ok end end),
+    true = register(couch_event_server, EvtPid),
+    EvtPid.
 
-teardown(_) ->
+
+teardown(EvtPid) ->
+    unlink(EvtPid),
+    exit(EvtPid, kill),
     meck:unload(),
     delete_shard_file(?DBNAME).
 
@@ -364,22 +365,6 @@ t_handle_call_change_filter_design_docs() ->
         ?assertNot(meck:called(?MOD, db_change, [?DBNAME, Change, zig]))
     end).
 
-t_handle_call_created() ->
-    ?_test(begin
-        State = mock_state(),
-        handle_call_ok({created, ?DBNAME}, State),
-        ?assert(meck:validate(?MOD)),
-        ?assert(meck:called(?MOD, db_created, [?DBNAME, zig]))
-    end).
-
-t_handle_call_deleted() ->
-     ?_test(begin
-        State = mock_state(),
-        handle_call_ok({deleted, ?DBNAME}, State),
-        ?assert(meck:validate(?MOD)),
-        ?assert(meck:called(?MOD, db_deleted, [?DBNAME, zig]))
-    end).
-
 t_handle_call_checkpoint_new() ->
     ?_test(begin
         Tid = mock_ets(),
@@ -399,6 +384,44 @@ t_handle_call_checkpoint_existing() ->
         ets:delete(Tid)
     end).
 
+t_handle_info_created() ->
+    ?_test(begin
+        State = mock_state(),
+        handle_info_check({'$couch_event', ?DBNAME, created}, State),
+        ?assert(meck:validate(?MOD)),
+        ?assert(meck:called(?MOD, db_created, [?DBNAME, zig]))
+    end).
+
+t_handle_info_deleted() ->
+     ?_test(begin
+        State = mock_state(),
+        handle_info_check({'$couch_event', ?DBNAME, deleted}, State),
+        ?assert(meck:validate(?MOD)),
+        ?assert(meck:called(?MOD, db_deleted, [?DBNAME, zig]))
+    end).
+
+t_handle_info_updated() ->
+     ?_test(begin
+        Tid = mock_ets(),
+        State = mock_state(Tid),
+        handle_info_check({'$couch_event', ?DBNAME, updated}, State),
+        ?assert(meck:validate(?MOD)),
+        ?assert(meck:called(?MOD, db_found, [?DBNAME, zig]))
+    end).
+
+t_handle_info_other_event() ->
+     ?_test(begin
+        State = mock_state(),
+        handle_info_check({'$couch_event', ?DBNAME, somethingelse}, State)
+    end).
+
+t_handle_info_created_other_db() ->
+     ?_test(begin
+        State = mock_state(),
+        handle_info_check({'$couch_event', <<"otherdb">>, created}, State),
+        ?assertNot(meck:called(?MOD, db_created, [?DBNAME, zig]))
+    end).
+
 t_handle_info_scanner_exit_normal() ->
     ?_test(begin
         Res = handle_info({'EXIT', spid, normal}, mock_state()),
@@ -413,12 +436,10 @@ t_handle_info_scanner_crashed() ->
         ?assertMatch({stop, {scanner_died, oops}, _State}, Res)
     end).
 
-t_handle_info_event_listener_exited() ->
+t_handle_info_event_server_exited() ->
     ?_test(begin
-        Res0 = handle_info({'EXIT', elpid, normal}, mock_state()),
-        ?assertMatch({stop, {db_update_notifier_died, normal}, _}, Res0),
-        Res1 = handle_info({'EXIT', elpid, oops}, mock_state()),
-        ?assertMatch({stop, {db_update_notifier_died, oops}, _}, Res1)
+        Res = handle_info({'DOWN', esref, type, espid, reason}, mock_state()),
+        ?assertMatch({stop, {couch_event_server_died, reason},_}, Res)
     end).
 
 t_handle_info_unknown_pid_exited() ->
@@ -515,9 +536,7 @@ t_handle_call_resume_scan_no_chfeed_no_ets_entry() ->
     ?_test(begin
         Tid = mock_ets(),
         State = mock_state(Tid),
-        Res = handle_cast({resume_scan, ?DBNAME}, State),
-        ?assertMatch({noreply, _}, Res),
-        {noreply, RState} = Res,
+        RState = resume_scan(?DBNAME, State),
         % Check if inserted checkpoint entry in ets starting at 0
         ?assertEqual([{?DBNAME, 0, false}], ets:tab2list(Tid)),
         % Check if called db_found callback
@@ -541,7 +560,7 @@ t_handle_call_resume_scan_chfeed_no_ets_entry() ->
         Tid = mock_ets(),
         Pid = start_changes_reader(?DBNAME, 0),
         State = mock_state(Tid, Pid),
-        ?assertMatch({noreply, _}, handle_cast({resume_scan, ?DBNAME}, State)),
+        resume_scan(?DBNAME, State),
         % Check ets checkpoint is set to 0 and rescan = true
         ?assertEqual([{?DBNAME, 0, true}], ets:tab2list(Tid)),
         ets:delete(Tid),
@@ -554,7 +573,7 @@ t_handle_call_resume_scan_chfeed_ets_entry() ->
         true = ets:insert(Tid, [{?DBNAME, 2, false}]),
         Pid = start_changes_reader(?DBNAME, 1),
         State = mock_state(Tid, Pid),
-        ?assertMatch({noreply, _}, handle_cast({resume_scan, ?DBNAME}, State)),
+        resume_scan(?DBNAME, State),
         % Check ets checkpoint is set to same endseq but rescan = true
         ?assertEqual([{?DBNAME, 2, true}], ets:tab2list(Tid)),
         ets:delete(Tid),
@@ -566,9 +585,7 @@ t_handle_call_resume_scan_no_chfeed_ets_entry() ->
         Tid = mock_ets(),
         true = ets:insert(Tid, [{?DBNAME, 1, true}]),
         State = mock_state(Tid),
-        Res = handle_cast({resume_scan, ?DBNAME}, State),
-        ?assertMatch({noreply, _}, Res),
-        {noreply, RState} = Res,
+        RState = resume_scan(?DBNAME, State),
         % Check if reset rescan to false but kept same endseq
         ?assertEqual([{?DBNAME, 1, false}], ets:tab2list(Tid)),
         % Check if started a change reader
@@ -593,14 +610,12 @@ t_start_link() ->
             mod = ?MOD,
             suffix = ?SUFFIX,
             ctx = nil,
-            event_listener = elpid,
             pids = [],
             skip_ddocs = false
         },  sys:get_state(Pid)),
         unlink(Pid),
         exit(Pid, kill),
-        ?assert(meck:called(couch_event, link_listener,
-            [?MODULE, handle_db_event, {Pid, ?SUFFIX}, [all_dbs]]))
+        ?assert(meck:called(couch_event, register_all, [Pid]))
     end).
 
 t_start_link_no_ddocs() ->
@@ -611,53 +626,9 @@ t_start_link_no_ddocs() ->
             mod = ?MOD,
             suffix = ?SUFFIX,
             ctx = nil,
-            event_listener = elpid,
             pids = [],
             skip_ddocs = true
         },  sys:get_state(Pid)),
-        unlink(Pid),
-        exit(Pid, kill)
-    end).
-
-t_handle_db_event_created() ->
-    ?_test(begin
-        {ok, Pid} = start_link(?SUFFIX, ?MOD, zig, []),
-        Acc = {Pid, ?SUFFIX},
-        {ok, Acc} = handle_db_event(<<"otherdb">>, created, Acc),
-        ?assertNot(meck:called(?MOD, db_created, [?DBNAME, zig])),
-        {ok, Acc} = handle_db_event(?DBNAME, created, Acc),
-        ?assert(meck:called(?MOD, db_created, [?DBNAME, zig])),
-        unlink(Pid),
-        exit(Pid, kill)
-    end).
-
-t_handle_db_event_deleted() ->
-    ?_test(begin
-        {ok, Pid} = start_link(?SUFFIX, ?MOD, zig, []),
-        Acc = {Pid, ?SUFFIX},
-        {ok, Acc} = handle_db_event(<<"otherdb">>, deleted, Acc),
-        ?assertNot(meck:called(?MOD, db_deleted, [?DBNAME, zig])),
-        {ok, Acc} = handle_db_event(?DBNAME, deleted, Acc),
-        ?assert(meck:called(?MOD, db_deleted, [?DBNAME, zig])),
-        unlink(Pid),
-        exit(Pid, kill)
-    end).
-
-t_handle_db_event_updated() ->
-    ?_test(begin
-        {ok, Pid} = start_link(?SUFFIX, ?MOD, zig, []),
-        Acc = {Pid, ?SUFFIX},
-        {ok, Acc} = handle_db_event(?DBNAME, updated, Acc),
-        ok = meck:wait(?MOD, db_found, [?DBNAME, zig], 2000),
-        unlink(Pid),
-        exit(Pid, kill)
-    end).
-
-t_handle_db_event_other() ->
-    ?_test(begin
-        {ok, Pid} = start_link(?SUFFIX, ?MOD, zig, []),
-        Acc = {Pid, ?SUFFIX},
-        {ok, Acc} = handle_db_event(?DBNAME, other, Acc),
         unlink(Pid),
         exit(Pid, kill)
     end).
@@ -727,7 +698,7 @@ mock_state() ->
         mod = ?MOD,
         ctx = zig,
         suffix = ?SUFFIX,
-        event_listener = elpid,
+        event_server = esref,
         scanner = spid,
         pids = []}.
 
@@ -768,5 +739,8 @@ create_shard_file(DbName) ->
 
 handle_call_ok(Msg, State) ->
     ?assertMatch({reply, ok, _}, handle_call(Msg, from, State)).
+
+handle_info_check(Msg, State) ->
+    ?assertMatch({noreply, _}, handle_info(Msg, State)).
 
 -endif.
