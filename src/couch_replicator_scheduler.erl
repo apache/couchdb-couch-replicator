@@ -472,14 +472,11 @@ start_pending_jobs(State, Running, Pending) ->
 rotate_jobs(State, Running, Pending) ->
     #state{max_jobs=MaxJobs, max_churn=MaxChurn} = State,
     if Running == MaxJobs, Pending > 0 ->
-        stop_jobs(min([Pending, Running, MaxChurn]), State),
-        start_jobs(min([Pending, Running, MaxChurn]), State);
+        stop_jobs(lists:min([Pending, Running, MaxChurn]), State),
+        start_jobs(lists:min([Pending, Running, MaxChurn]), State);
     true ->
         ok
     end.
-
-min(List) ->
-    hd(lists:sort(List)).
 
 
 -spec last_started(#job{}) -> erlang:timestamp().
