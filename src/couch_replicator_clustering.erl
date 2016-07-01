@@ -151,8 +151,8 @@ code_change(_OldVsn, State, _Extra) ->
 %% Internal functions
 
 -spec new_timer(non_neg_integer()) -> timer:tref().
-new_timer(Interval) ->
-    {ok, Timer} = timer:send_after(Interval, stability_check),
+new_timer(IntervalSec) ->
+    {ok, Timer} = timer:send_after(IntervalSec * 1000, stability_check),
     Timer.
 
 
