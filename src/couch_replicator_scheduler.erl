@@ -570,7 +570,7 @@ jobs() ->
         History = lists:map(fun(Event) ->
             EventProps  = case Event of
                 {{crashed, Reason}, _When} ->
-                    [{type, crashed}, {reason, Reason}];
+                    [{type, crashed}, {reason, crash_reason_json(Reason)}];
                 {Type, _When} ->
                     [{type, Type}]
             end,
@@ -594,6 +594,14 @@ jobs() ->
             {node, node()}
         ]} | Acc]
     end, [], couch_replicator_scheduler).
+
+
+crash_reason_json({_CrashType, Info}) when is_binary(Info) ->
+    Info;
+crash_reason_json(Reason) when is_binary(Reason) ->
+    Reason;
+crash_reason_json(_) ->
+    <<"unknown">>.
 
 
 -ifdef(TEST).
