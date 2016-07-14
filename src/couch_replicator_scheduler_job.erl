@@ -409,13 +409,13 @@ terminate(shutdown, #rep_state{rep_details = #rep{id = RepId}} = State) ->
     % Replication stopped via _scheduler_sup:terminate_child/1, which can be
     % occur during regular scheduler operation or when job is removed from
     % the scheduler.
-    State1 = case do_last_checkpoint(State) of
-        {stop, normal, NewState} ->
+    State1 = case do_checkpoint(State) of
+        {ok, NewState} ->
             NewState;
-        {stop, Error, NewState} ->
+        Error ->
             LogMsg = "~p : Failed last checkpoint. Job: ~p Error: ~p",
             couch_log:error(LogMsg, [?MODULE, RepId, Error]),
-            NewState
+            State
     end,
     couch_replicator_notifier:notify({stopped, RepId, <<"stopped">>}),
     terminate_cleanup(State1);
