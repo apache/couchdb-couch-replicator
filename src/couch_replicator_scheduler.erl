@@ -583,8 +583,15 @@ jobs() ->
             {[{timestamp, ISO8601} | EventProps]}
         end, Job#job.history),
         {BaseID, Ext} = Job#job.id,
+        Pid = case Job#job.pid of
+            undefined ->
+                null;
+            P when is_pid(P) ->
+                ?l2b(pid_to_list(P))
+        end,
         [{[
             {id, iolist_to_binary([BaseID, Ext])},
+            {pid, Pid},
             {source, iolist_to_binary(Source)},
             {target, iolist_to_binary(Target)},
             {database, Rep#rep.db_name},
