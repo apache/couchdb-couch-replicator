@@ -280,12 +280,14 @@ start_jobs(Count, State) ->
     ok.
 
 
-stop_jobs(Count, State) ->
+-spec stop_jobs(non_neg_integer(), boolean(), #state{}) -> non_neg_integer().
+stop_jobs(Count, IsContinuous, State) ->
     Running0 = running_jobs(),
-    Running1 = lists:sort(fun oldest_job_first/2, Running0),
-    Running2 = lists:sublist(Running1, Count),
-    [stop_job_int(Job, State) || Job <- Running2],
-    ok.
+    ContinuousPred = fun(Job) -> is_continuous(Job) =:= IsContinuous end,
+    Running1 = lists:filter(ContinuousPred, Running0),
+    Running2 = lists:sort(fun oldest_job_first/2, Running1),
+    Running3 = lists:sublist(Running2, Count),
+    length([stop_job_int(Job, State) || Job <- Running3]).
 
 
 oldest_job_first(#job{} = A, #job{} = B) ->
@@ -451,10 +453,19 @@ reschedule(State) ->
     ok.
 
 
+-spec stop_excess_jobs(#state{}, non_neg_integer()) -> ok.
 stop_excess_jobs(State, Running) ->
     #state{max_jobs=MaxJobs} = State,
-    if Running > MaxJobs ->
-        stop_jobs(Running - MaxJobs, State);
+    StopCount = Running - MaxJobs,
+    if StopCount > 0 ->
+        Stopped = stop_jobs(StopCount, true, State),
+        OneshotLeft = StopCount - Stopped,
+        if OneshotLeft > 0 ->
+            stop_jobs(OneshotLeft, false, State),
+            ok;
+        true ->
+            ok
+        end;
     true ->
         ok
     end.
@@ -472,11 +483,13 @@ start_pending_jobs(State, Running, Pending) ->
         ok
     end.
 
+-spec rotate_jobs(#state{}, non_neg_integer(), non_neg_integer()) -> ok.
 rotate_jobs(State, Running, Pending) ->
     #state{max_jobs=MaxJobs, max_churn=MaxChurn} = State,
     if Running == MaxJobs, Pending > 0 ->
-        stop_jobs(lists:min([Pending, Running, MaxChurn]), State),
-        start_jobs(lists:min([Pending, Running, MaxChurn]), State);
+        RotateCount = lists:min([Pending, Running, MaxChurn]),
+        StopCount = stop_jobs(RotateCount, true, State),
+        start_jobs(StopCount, State);
     true ->
         ok
     end.
@@ -611,6 +624,11 @@ crash_reason_json(_) ->
     <<"unknown">>.
 
 
+-spec is_continuous(#job{}) -> boolean().
+is_continuous(#job{rep = Rep}) ->
+    couch_util:get_value(continuous, Rep#rep.options, false).
+
+
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
 
@@ -668,12 +686,350 @@ oldest_job_first_test() ->
     ?assertEqual([J0, J1, J2], Sort([J2, J1, J0])).
 
 
+scheduler_test_() ->
+    {
+        foreach,
+        fun setup/0,
+        fun teardown/1,
+        [
+            t_one_job_starts(),
+            t_no_jobs_start_if_max_is_0(),
+            t_one_job_starts_if_max_is_1(),
+            t_max_churn_does_not_throttle_initial_start(),
+            t_excess_oneshot_only_jobs(),
+            t_excess_continuous_only_jobs(),
+            t_excess_prefer_continuous_first(),
+            t_stop_oldest_first(),
+            t_start_oldest_first(),
+            t_dont_stop_if_nothing_pending(),
+            t_max_churn_limits_number_of_rotated_jobs(),
+            t_if_pending_less_than_running_start_all_pending(),
+            t_running_less_than_pending_swap_all_running(),
+            t_oneshot_dont_get_rotated(),
+            t_rotate_continuous_only_if_mixed(),
+            t_oneshot_dont_get_starting_priority(),
+            t_oneshot_will_hog_the_scheduler(),
+            t_if_excess_is_trimmed_rotation_doesnt_happen()
+         ]
+    }.
+
+
+t_one_job_starts() ->
+    ?_test(begin
+        setup_jobs([oneshot(1)]),
+        ?assertEqual({0, 1}, run_stop_count()),
+        reschedule(mock_state(?DEFAULT_MAX_JOBS)),
+        ?assertEqual({1, 0}, run_stop_count())
+    end).
+
+
+t_no_jobs_start_if_max_is_0() ->
+    ?_test(begin
+        setup_jobs([oneshot(1)]),
+        reschedule(mock_state(0)),
+        ?assertEqual({0, 1}, run_stop_count())
+    end).
+
+
+t_one_job_starts_if_max_is_1() ->
+    ?_test(begin
+        setup_jobs([oneshot(1), oneshot(2)]),
+        reschedule(mock_state(1)),
+        ?assertEqual({1, 1}, run_stop_count())
+    end).
+
+
+t_max_churn_does_not_throttle_initial_start() ->
+    ?_test(begin
+        setup_jobs([oneshot(1), oneshot(2)]),
+        reschedule(mock_state(?DEFAULT_MAX_JOBS, 0)),
+        ?assertEqual({2, 0}, run_stop_count())
+    end).
+
+
+t_excess_oneshot_only_jobs() ->
+    ?_test(begin
+        setup_jobs([oneshot_running(1), oneshot_running(2)]),
+        ?assertEqual({2, 0}, run_stop_count()),
+        reschedule(mock_state(1)),
+        ?assertEqual({1, 1}, run_stop_count()),
+        reschedule(mock_state(0)),
+        ?assertEqual({0, 2}, run_stop_count())
+    end).
+
+
+t_excess_continuous_only_jobs() ->
+    ?_test(begin
+        setup_jobs([continuous_running(1), continuous_running(2)]),
+        ?assertEqual({2, 0}, run_stop_count()),
+        reschedule(mock_state(1)),
+        ?assertEqual({1, 1}, run_stop_count()),
+        reschedule(mock_state(0)),
+        ?assertEqual({0, 2}, run_stop_count())
+    end).
+
+
+t_excess_prefer_continuous_first() ->
+    ?_test(begin
+        Jobs = [
+            continuous_running(1),
+            oneshot_running(2),
+            continuous_running(3)
+        ],
+        setup_jobs(Jobs),
+        ?assertEqual({3, 0}, run_stop_count()),
+        ?assertEqual({1, 0}, oneshot_run_stop_count()),
+        reschedule(mock_state(2)),
+        ?assertEqual({2, 1}, run_stop_count()),
+        ?assertEqual({1, 0}, oneshot_run_stop_count()),
+        reschedule(mock_state(1)),
+        ?assertEqual({1, 0}, oneshot_run_stop_count()),
+        reschedule(mock_state(0)),
+        ?assertEqual({0, 1}, oneshot_run_stop_count())
+    end).
+
+
+t_stop_oldest_first() ->
+    ?_test(begin
+        Jobs = [
+            continuous_running(7),
+            continuous_running(4),
+            continuous_running(5)
+        ],
+        setup_jobs(Jobs),
+        reschedule(mock_state(2)),
+        ?assertEqual({2, 1}, run_stop_count()),
+        ?assertEqual([4], jobs_stopped()),
+        reschedule(mock_state(1)),
+        ?assertEqual([7], jobs_running())
+    end).
+
+
+t_start_oldest_first() ->
+    ?_test(begin
+        setup_jobs([continuous(7), continuous(2), continuous(5)]),
+        reschedule(mock_state(1)),
+        ?assertEqual({1, 2}, run_stop_count()),
+        ?assertEqual([2], jobs_running()),
+        reschedule(mock_state(2)),
+        ?assertEqual([7], jobs_stopped())
+    end).
+
+
+t_dont_stop_if_nothing_pending() ->
+    ?_test(begin
+        setup_jobs([continuous_running(1), continuous_running(2)]),
+        reschedule(mock_state(2)),
+        ?assertEqual({2, 0}, run_stop_count())
+    end).
+
+
+t_max_churn_limits_number_of_rotated_jobs() ->
+    ?_test(begin
+        Jobs = [
+            continuous(1),
+            continuous_running(2),
+            continuous(3),
+            continuous_running(4)
+        ],
+        setup_jobs(Jobs),
+        reschedule(mock_state(2, 1)),
+        ?assertEqual([2, 3], jobs_stopped())
+    end).
+
+
+t_if_pending_less_than_running_start_all_pending() ->
+    ?_test(begin
+        Jobs = [
+            continuous(1),
+            continuous_running(2),
+            continuous(3),
+            continuous_running(4),
+            continuous_running(5)
+        ],
+        setup_jobs(Jobs),
+        reschedule(mock_state(3)),
+        ?assertEqual([1, 2, 5], jobs_running())
+    end).
+
+
+t_running_less_than_pending_swap_all_running() ->
+    ?_test(begin
+        Jobs = [
+            continuous(1),
+            continuous(2),
+            continuous(3),
+            continuous_running(4),
+            continuous_running(5)
+        ],
+        setup_jobs(Jobs),
+        reschedule(mock_state(2)),
+        ?assertEqual([3, 4, 5], jobs_stopped())
+    end).
+
+
+t_oneshot_dont_get_rotated() ->
+    ?_test(begin
+        setup_jobs([oneshot_running(1), continuous(2)]),
+        reschedule(mock_state(1)),
+        ?assertEqual([1], jobs_running())
+    end).
+
+
+t_rotate_continuous_only_if_mixed() ->
+    ?_test(begin
+        setup_jobs([continuous(1), oneshot_running(2), continuous_running(3)]),
+        reschedule(mock_state(2)),
+        ?assertEqual([1, 2], jobs_running())
+    end).
+
+
+t_oneshot_dont_get_starting_priority() ->
+    ?_test(begin
+        setup_jobs([continuous(1), oneshot(2), continuous_running(3)]),
+        reschedule(mock_state(1)),
+        ?assertEqual([1], jobs_running())
+    end).
+
+
+% This tested in other test cases, it is here to mainly make explicit a property
+% of one-shot replications -- they can starve other jobs if they "take control" of
+% all the available scheduler slots.
+t_oneshot_will_hog_the_scheduler() ->
+    ?_test(begin
+        Jobs = [
+            oneshot_running(1),
+            oneshot_running(2),
+            oneshot(3),
+            continuous(4)
+        ],
+        setup_jobs(Jobs),
+        reschedule(mock_state(2)),
+        ?assertEqual([1, 2], jobs_running())
+    end).
+
+
+t_if_excess_is_trimmed_rotation_doesnt_happen() ->
+    ?_test(begin
+        Jobs = [
+            continuous(1),
+            continuous_running(2),
+            continuous_running(3)
+        ],
+        setup_jobs(Jobs),
+        reschedule(mock_state(1)),
+        ?assertEqual([3], jobs_running())
+    end).
+
+
 % Test helper functions
+
+setup() ->
+    catch ets:delete(?MODULE),
+    meck:expect(couch_log, notice, 2, ok),
+    meck:expect(couch_log, warning, 2, ok),
+    meck:expect(couch_replicator_scheduler_sup, terminate_child, 1, ok),
+    meck:expect(couch_stats, increment_counter, 1, ok),
+    meck:expect(couch_stats, update_gauge, 2, ok),
+    Pid = mock_pid(),
+    meck:expect(couch_replicator_scheduler_sup, start_child, 1, {ok, Pid}).
+
+
+teardown(_) ->
+    catch ets:delete(?MODULE),
+    meck:unload().
+
+
+setup_jobs(Jobs) when is_list(Jobs) ->
+    ?MODULE = ets:new(?MODULE, [named_table, {keypos, #job.id}]),
+    ets:insert(?MODULE, Jobs).
+
+
+all_jobs() ->
+    lists:usort(ets:tab2list(?MODULE)).
+
+
+jobs_stopped() ->
+    [Job#job.id || Job <- all_jobs(), Job#job.pid =:= undefined].
+
+
+jobs_running() ->
+    [Job#job.id || Job <- all_jobs(), Job#job.pid =/= undefined].
+
+
+run_stop_count() ->
+    {length(jobs_running()), length(jobs_stopped())}.
+
+
+oneshot_run_stop_count() ->
+    Running = [Job#job.id || Job <- all_jobs(), Job#job.pid =/= undefined,
+        not is_continuous(Job)],
+    Stopped = [Job#job.id || Job <- all_jobs(), Job#job.pid =:= undefined,
+        not is_continuous(Job)],
+    {length(Running), length(Stopped)}.
+
+
+mock_state(MaxJobs) ->
+    #state{
+        max_jobs = MaxJobs,
+        max_churn = ?DEFAULT_MAX_CHURN,
+        max_history = ?DEFAULT_MAX_HISTORY
+    }.
+
+mock_state(MaxJobs, MaxChurn) ->
+    #state{
+        max_jobs = MaxJobs,
+        max_churn = MaxChurn,
+        max_history = ?DEFAULT_MAX_HISTORY
+    }.
+
+
+continuous(Id) when is_integer(Id) ->
+    Started = Id,
+    Hist = [stopped(Started+1), started(Started), added()],
+    #job{
+        id = Id,
+        history = Hist,
+        rep = #rep{options = [{continuous, true}]}
+    }.
+
+
+continuous_running(Id) when is_integer(Id) ->
+    Started = Id,
+    Pid = mock_pid(),
+    #job{
+        id = Id,
+        history = [started(Started), added()],
+        rep = #rep{options = [{continuous, true}]},
+        pid = Pid,
+        monitor = monitor(process, Pid)
+    }.
+
+
+oneshot(Id) when is_integer(Id) ->
+    Started = Id,
+    Hist = [stopped(Started + 1), started(Started), added()],
+    #job{id = Id, history = Hist, rep = #rep{options = []}}.
+
+
+oneshot_running(Id) when is_integer(Id) ->
+    Started = Id,
+    Pid = mock_pid(),
+    #job{
+        id = Id,
+        history = [started(Started), added()],
+        rep = #rep{options = []},
+        pid = Pid,
+        monitor = monitor(process, Pid)
+    }.
 
 
 job(Hist) when is_list(Hist) ->
-    #job{history=Hist}.
+    #job{history = Hist}.
 
+
+mock_pid() ->
+   list_to_pid("<0.999.999>").
 
 crashed() ->
     crashed(0).
