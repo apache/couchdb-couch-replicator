@@ -13,38 +13,67 @@
 -module(couch_replicator_doc_processor).
 -behaviour(couch_multidb_changes).
 
+-export([start_link/0]).
+
 % multidb changes callback
 -export([db_created/2, db_deleted/2, db_found/2, db_change/3]).
+
+% gen_server callbacks
+-export([init/1, handle_call/3, handle_info/2, handle_cast/2,
+         code_change/3, terminate/2]).
 
 -include_lib("couch/include/couch_db.hrl").
 -include("couch_replicator.hrl").
 
 -import(couch_replicator_utils, [
     get_json_value/2,
-    get_json_value/3,
-    pp_rep_id/1
+    get_json_value/3
 ]).
 
+-define(ERROR_MAX_BACKOFF_EXPONENT, 17).  % ~ 1 day on average
+-define(TS_DAY_SEC, 86400).
+
+-type filter_type() ::  nil | view | user | docids | mango.
+-type repstate() :: unscheduled | error | scheduled.
+
+
+-record(rdoc, {
+    id :: db_doc_id(),
+    state :: repstate(),
+    rep :: #rep{} | nil,
+    rid :: rep_id() | nil,
+    filter :: filter_type(),
+    info :: binary() | nil,
+    errcnt :: non_neg_integer(),
+    worker :: reference() | nil
+}).
+
+
+
+% couch_multidb_changes API callbacks
 
 db_created(DbName, Server) ->
     couch_stats:increment_counter([couch_replicator, docs, dbs_created]),
     couch_replicator_docs:ensure_rep_ddoc_exists(DbName),
     Server.
 
+
 db_deleted(DbName, Server) ->
     couch_stats:increment_counter([couch_replicator, docs, dbs_deleted]),
-    clean_up_replications(DbName),
+    ok = gen_server:call(?MODULE, {clean_up_replications, DbName}, infinity),
     Server.
+
 
 db_found(DbName, Server) ->
     couch_stats:increment_counter([couch_replicator, docs, dbs_found]),
     couch_replicator_docs:ensure_rep_ddoc_exists(DbName),
     Server.
 
+
 db_change(DbName, {ChangeProps} = Change, Server) ->
     couch_stats:increment_counter([couch_replicator, docs, db_changes]),
     try
-        ok = process_update(DbName, Change)
+        ok = process_change(DbName, Change)
     catch
     _Tag:Error ->
         {RepProps} = get_json_value(doc, ChangeProps),
@@ -54,32 +83,35 @@ db_change(DbName, {ChangeProps} = Change, Server) ->
     Server.
 
 
--spec process_update(binary(), {[_]}) -> ok.
-process_update(DbName, {Change}) ->
+% Private helpers for multidb changes API, these updates into the doc
+% processor gen_server
+
+process_change(DbName, {Change}) ->
     {RepProps} = JsonRepDoc = get_json_value(doc, Change),
     DocId = get_json_value(<<"_id">>, RepProps),
     Owner = couch_replicator_clustering:owner(DbName, DocId),
+    Id = {DbName, DocId},
     case {Owner, get_json_value(deleted, Change, false)} of
     {_, true} ->
-        remove_jobs(DbName, DocId);
+        ok = gen_server:call(?MODULE, {removed, Id}, infinity);
     {unstable, false} ->
         couch_log:notice("Not starting '~s' as cluster is unstable", [DocId]);
     {ThisNode, false} when ThisNode =:= node() ->
         case get_json_value(<<"_replication_state">>, RepProps) of
         undefined ->
-            maybe_start_replication(DbName, DocId, JsonRepDoc);
+            ok = process_updated(Id, JsonRepDoc);
         <<"triggered">> ->
             couch_replicator_docs:remove_state_fields(DbName, DocId),
-            maybe_start_replication(DbName, DocId, JsonRepDoc);
+            ok = process_updated(Id, JsonRepDoc);
         <<"completed">> ->
-            couch_log:notice("Ignoring completed replication '~s'", [DocId]);
+            ok;
         <<"error">> ->
             % Handle replications started from older versions of replicator
             % which wrote transient errors to replication docs
             couch_replicator_docs:remove_state_fields(DbName, DocId),
-            maybe_start_replication(DbName, DocId, JsonRepDoc);
+            ok = process_updated(Id, JsonRepDoc);
         <<"failed">> ->
-            couch_log:warning("Ignoring failed replication '~s'", [DocId])
+            ok
         end;
     {Owner, false} ->
         ok
@@ -87,54 +119,231 @@ process_update(DbName, {Change}) ->
     ok.
 
 
--spec maybe_start_replication(binary(), binary(), {[_]}) -> ok.
-maybe_start_replication(DbName, DocId, RepDoc) ->
-    #rep{id = RepId} = Rep0 = couch_replicator_docs:parse_rep_doc(RepDoc),
+process_updated({DbName, _DocId} = Id, JsonRepDoc) ->
+    % Parsing replication doc (but not calculating the id) could throw an
+    % exception which would indicate this document is malformed. This exception
+    % should propagate to db_change function and will be recorded as permanent
+    % failure in the document. User will have to delete and re-create the document
+    % to fix the problem.
+    Rep0 = couch_replicator_docs:parse_rep_doc_without_id(JsonRepDoc),
     Rep = Rep0#rep{db_name = DbName},
-    case couch_replicator_scheduler:rep_state(RepId) of
-    nil ->
-        case couch_replicator_scheduler:add_job(Rep) of
-        ok ->
-            ok;
-        {error, already_added} ->
-            couch_log:warning("replicator scheduler: ~p was already added", [Rep])
-        end,
-        ok;
-    #rep{doc_id = DocId} ->
-        ok;
-    #rep{doc_id = null} ->
-        couch_log:warning("Replication `~s` specified by document `~s`"
-            " already running as a transient replication, started via"
-            " `_replicate` API endpoint", [pp_rep_id(RepId), DocId]);
-    #rep{db_name = OtherDbName, doc_id = OtherDocId} ->
-        case mem3:dbname(OtherDbName) =:= mem3:dbname(DbName) of
-        true ->
-            Msg = io_lib:format("Replication `~s` specified by document `~s`"
-                " already started, triggered by document `~s` from the same"
-                " database", [pp_rep_id(RepId), DocId, OtherDocId]),
-            couch_log:notice(Msg, []),
-            couch_replicator_docs:update_failed(DbName, DocId, Msg);
-        false ->
-            Msg = io_lib:format("Replication `~s` specified by document `~s`"
-                " already started triggered by document `~s` from a different"
-                " database", [pp_rep_id(RepId), DocId, OtherDocId]),
-            couch_log:warning(Msg, []),
-            couch_replicator_docs:update_failed(DbName, DocId, Msg)
-        end
+    Filter = case couch_replicator_filters:parse(Rep#rep.options) of
+    {ok, nil} ->
+        nil;
+    {ok, {user, _FName, _QP}} ->
+        user;
+    {ok, {view, _FName, _QP}} ->
+        view;
+    {ok, {docids, _DocIds}} ->
+        docids;
+    {ok, {mango, _Selector}} ->
+        mango;
+    {error, FilterError} ->
+        throw(FilterError)
+    end,
+    gen_server:call(?MODULE, {updated, Id, Rep, Filter}, infinity).
+
+
+% Doc processor gen_server API and callbacks
+
+start_link() ->
+    gen_server:start_link({local, ?MODULE}, ?MODULE, [],  []).
+
+
+init([]) ->
+    ?MODULE = ets:new(?MODULE, [named_table, {keypos, #rdoc.id}]),
+    {ok, nil}.
+
+
+terminate(_Reason, _State) ->
+    ok.
+
+
+handle_call({updated, Id, Rep, Filter}, _From, State) ->
+    ok = updated_doc(Id, Rep, Filter),
+    {reply, ok, State};
+
+handle_call({removed, Id}, _From, State) ->
+    ok = removed_doc(Id),
+    {reply, ok, State};
+
+handle_call({clean_up_replications, DbName}, _From, State) ->
+    ok = removed_db(DbName),
+    {reply, ok, State}.
+
+
+handle_cast(Msg, State) ->
+    {stop, {error, unexpected_message, Msg}, State}.
+
+
+handle_info({'DOWN', Ref, _, _, #doc_worker_result{id = Id, result = Res}},
+        State) ->
+    ok = worker_returned(Ref, Id, Res),
+    {noreply, State};
+
+handle_info(Msg, State) ->
+    {noreply, State}.
+
+
+code_change(_OldVsn, State, _Extra) ->
+    {ok, State}.
+
+
+% Doc processor gen_server private helper functions
+
+% Handle doc update -- add to ets, then start a worker to try to turn it into
+% a replication job. In most cases it will succeed quickly but for filtered
+% replicationss or if there are duplicates, it could take longer
+% (theoretically indefinitely) until a replication could be started.
+-spec updated_doc(db_doc_id(), #rep{}, filter_type()) -> ok.
+updated_doc(Id, Rep, Filter) ->
+    Row = #rdoc{
+        id = Id,
+        state = unscheduled,
+        rep = Rep,
+        rid = nil,
+        filter = Filter,
+        info = nil,
+        errcnt = 0,
+        worker = nil
+    },
+    true = ets:insert(?MODULE, Row),
+    ok = maybe_start_worker(Id),
+    ok.
+
+
+-spec worker_returned(reference(), db_doc_id(), rep_start_result()) -> ok.
+worker_returned(Ref, Id, {ok, RepId}) ->
+    case ets:lookup(?MODULE, Id) of
+    [#rdoc{worker = Ref} = Row] ->
+        true = ets:insert(?MODULE, update_docs_row(Row, RepId)),
+        ok = maybe_start_worker(Id);
+    _ ->
+        ok  % doc could have been deleted, ignore
+    end,
+    ok;
+
+worker_returned(Ref, Id, {temporary_error, Reason}) ->
+    case ets:lookup(?MODULE, Id) of
+    [#rdoc{worker = Ref, errcnt = ErrCnt} = Row] ->
+        NewRow = Row#rdoc{
+            rid = nil,
+            state = error,
+            info = Reason,
+            errcnt = ErrCnt + 1,
+            worker = nil
+        },
+        true = ets:insert(?MODULE, NewRow),
+        ok = maybe_start_worker(Id);
+    _ ->
+        ok  % doc could have been deleted, ignore
+    end,
+    ok;
+
+worker_returned(Ref, Id, {permanent_failure, _Reason}) ->
+    case ets:lookup(?MODULE, Id) of
+    [#rdoc{worker = Ref}] ->
+        true = ets:delete(?MODULE, Id);
+    _ ->
+        ok  % doc could have been deleted, ignore
     end,
     ok.
 
 
--spec remove_jobs(binary(), binary()) -> ok.
-remove_jobs(DbName, DocId) ->
+% Filtered replication id didn't change.
+-spec update_docs_row(#rdoc{}, rep_id()) -> #rdoc{}.
+update_docs_row(#rdoc{rid = RepId, filter = user} = Row, RepId) ->
+    Row#rdoc{state = scheduled, errcnt = 0, worker = nil};
+
+% Calculated new replication id for a filtered replication. Make sure
+% to schedule another check as filter code could change. Replications starts
+% could have been failing, so also clear error count.
+update_docs_row(#rdoc{rid = nil, filter = user} = Row, RepId) ->
+    Row#rdoc{rid = RepId, state = scheduled, errcnt = 0, worker = nil};
+
+% Replication id of existing replication job with filter has changed.
+% Remove old replication job from scheduler and schedule check to check for
+% future changes.
+update_docs_row(#rdoc{rid = OldRepId, filter = user} = Row, RepId) ->
+    ok = couch_replicator_scheduler:remove_job(OldRepId),
+    Msg = io_lib:format("Replication id changed: ~p -> ~p", [OldRepId, RepId]),
+    Row#rdoc{
+        rid = RepId,
+        state = scheduled,
+        info = couch_util:to_binary(Msg),
+        errcnt = 0,
+        worker = nil
+     };
+
+% Calculated new replication id for non-filtered replication.
+ update_docs_row(#rdoc{rid = nil} = Row, RepId) ->
+    Row#rdoc{
+        rep = nil, % remove replication doc body, after this we won't needed any more
+        rid = RepId,
+        state = scheduled,
+        info = nil,
+        errcnt = 0,
+        worker = nil
+     }.
+
+
+-spec error_backoff(non_neg_integer()) -> seconds().
+error_backoff(ErrCnt) ->
+    Exp = min(ErrCnt, ?ERROR_MAX_BACKOFF_EXPONENT),
+    5 + random:uniform(1 bsl Exp).
+
+
+-spec filter_backoff() -> seconds().
+filter_backoff() ->
+    Total = ets:info(?MODULE, size),
+    Range = 1 + min(2 * (Total / 10), ?TS_DAY_SEC),
+    60 + random:uniform(round(Range)).
+
+
+% Document removed from db -- clear ets table and remove all scheduled jobs
+-spec removed_doc(db_doc_id()) -> ok.
+removed_doc({DbName, DocId} = Id) ->
+    ets:delete(?MODULE, Id),
     RepIds = couch_replicator_scheduler:find_jobs_by_doc(DbName, DocId),
     lists:foreach(fun couch_replicator_scheduler:remove_job/1, RepIds).
 
 
--spec clean_up_replications(binary()) -> ok.
-clean_up_replications(DbName) ->
+% Whole db shard is gone -- remove all its ets rows and stop jobs
+-spec removed_db(binary()) -> ok.
+removed_db(DbName) ->
+    EtsPat = #rdoc{id = {DbName, '_'}, _ = '_'},
+    ets:match_delete(?MODULE, EtsPat),
     RepIds = couch_replicator_scheduler:find_jobs_by_dbname(DbName),
     lists:foreach(fun couch_replicator_scheduler:remove_job/1, RepIds).
+
+
+% Spawn a worker process which will attempt to calculate a replication id, then
+% start a replication. Returns a process monitor reference. The worker is
+% guaranteed to exit with rep_start_result() type only.
+-spec maybe_start_worker(db_doc_id()) -> ok.
+maybe_start_worker(Id) ->
+    case ets:lookup(?MODULE, Id) of
+    [] ->
+        ok;
+    [#rdoc{state = scheduled, filter = Filter}] when Filter =/= user ->
+        ok;
+    [#rdoc{rep = Rep} = Doc] ->
+        Wait = get_worker_wait(Doc),
+        WRef = couch_replicator_doc_processor_worker:spawn_worker(Id, Rep, Wait),
+        true = ets:insert(?MODULE, Doc#rdoc{worker = WRef}),
+        ok
+    end.
+
+
+-spec get_worker_wait(#rdoc{}) -> seconds().
+get_worker_wait(#rdoc{state = scheduled, filter = user}) ->
+    filter_backoff();
+
+get_worker_wait(#rdoc{state = error, errcnt = ErrCnt}) ->
+    error_backoff(ErrCnt);
+
+get_worker_wait(#rdoc{state = unscheduled}) ->
+    0.
 
 
 
@@ -163,11 +372,7 @@ doc_processor_test_() ->
             t_error_change(),
             t_failed_change(),
             t_change_for_different_node(),
-            t_change_when_cluster_unstable(),
-            t_already_running_same_docid(),
-            t_already_running_transient(),
-            t_already_running_other_db_other_doc(),
-            t_already_running_other_doc_same_db()
+            t_change_when_cluster_unstable()
         ]
     }.
 
@@ -175,8 +380,6 @@ doc_processor_test_() ->
 % Can't parse replication doc, so should write failure state to document.
 t_bad_change() ->
     ?_test(begin
-        meck:expect(couch_replicator_docs, parse_rep_doc,
-            fun(_) -> throw({bad_rep_doc, <<"bad">>}) end),
         ?assertEqual(acc, db_change(?DB, bad_change(), acc)),
         ?assert(updated_doc_with_failed_state())
     end).
@@ -185,8 +388,9 @@ t_bad_change() ->
 % Regular change, parse to a #rep{} and then add job.
 t_regular_change() ->
     ?_test(begin
-        ?assertEqual(ok, process_update(?DB, change())),
-        ?assert(added_job())
+        ?assertEqual(ok, process_change(?DB, change())),
+        ?assert(ets:member(?MODULE, {?DB, ?DOC1})),
+        ?assert(started_worker({?DB, ?DOC1}))
     end).
 
 
@@ -195,7 +399,7 @@ t_deleted_change() ->
     ?_test(begin
         meck:expect(couch_replicator_scheduler, find_jobs_by_doc,
             fun(?DB, ?DOC1) -> [#rep{id = ?R2}] end),
-        ?assertEqual(ok, process_update(?DB, deleted_change())),
+        ?assertEqual(ok, process_change(?DB, deleted_change())),
         ?assert(removed_job(?R2))
     end).
 
@@ -203,17 +407,20 @@ t_deleted_change() ->
 % Change is in `triggered` state. Remove legacy state and add job.
 t_triggered_change() ->
     ?_test(begin
-        ?assertEqual(ok, process_update(?DB, change(<<"triggered">>))),
+        ?assertEqual(ok, process_change(?DB, change(<<"triggered">>))),
         ?assert(removed_state_fields()),
-        ?assert(added_job())
+        ?assert(ets:member(?MODULE, {?DB, ?DOC1})),
+        ?assert(started_worker({?DB, ?DOC1}))
     end).
+
 
 % Change is in `completed` state, so skip over it.
 t_completed_change() ->
     ?_test(begin
-        ?assertEqual(ok, process_update(?DB, change(<<"completed">>))),
+        ?assertEqual(ok, process_change(?DB, change(<<"completed">>))),
         ?assert(did_not_remove_state_fields()),
-        ?assert(did_not_add_job())
+        ?assertNot(ets:member(?MODULE, {?DB, ?DOC1})),
+        ?assert(did_not_spawn_worker())
     end).
 
 
@@ -222,9 +429,10 @@ t_completed_change() ->
 % written to the document anymore.
 t_error_change() ->
     ?_test(begin
-        ?assertEqual(ok, process_update(?DB, change(<<"error">>))),
+        ?assertEqual(ok, process_change(?DB, change(<<"error">>))),
         ?assert(removed_state_fields()),
-        ?assert(added_job())
+        ?assert(ets:member(?MODULE, {?DB, ?DOC1})),
+        ?assert(started_worker({?DB, ?DOC1}))
     end).
 
 
@@ -232,8 +440,10 @@ t_error_change() ->
 % be tried again, so skip over it.
 t_failed_change() ->
     ?_test(begin
-        ?assertEqual(ok, process_update(?DB, change(<<"failed">>))),
-        ?assert(did_not_add_job())
+        ?assertEqual(ok, process_change(?DB, change(<<"failed">>))),
+        ?assert(did_not_remove_state_fields()),
+        ?assertNot(ets:member(?MODULE, {?DB, ?DOC1})),
+        ?assert(did_not_spawn_worker())
     end).
 
 
@@ -242,8 +452,8 @@ t_failed_change() ->
 t_change_for_different_node() ->
    ?_test(begin
         meck:expect(couch_replicator_clustering, owner, 2, different_node),
-        ?assertEqual(ok, process_update(?DB, change())),
-        ?assert(did_not_add_job())
+        ?assertEqual(ok, process_change(?DB, change())),
+        ?assert(did_not_spawn_worker())
    end).
 
 
@@ -252,47 +462,8 @@ t_change_for_different_node() ->
 t_change_when_cluster_unstable() ->
    ?_test(begin
        meck:expect(couch_replicator_clustering, owner, 2, unstable),
-       ?assertEqual(ok, process_update(?DB, change())),
-       ?assert(did_not_add_job())
-   end).
-
-
-% Replication is already running, with same doc id. Ignore change.
-t_already_running_same_docid() ->
-   ?_test(begin
-       mock_already_running(?DB, ?DOC1),
-       ?assertEqual(ok, process_update(?DB, change())),
-       ?assert(did_not_add_job())
-   end).
-
-
-% There is a transient replication with same replication id running. Ignore change.
-t_already_running_transient() ->
-   ?_test(begin
-       mock_already_running(null, null),
-       ?assertEqual(ok, process_update(?DB, change())),
-       ?assert(did_not_add_job())
-   end).
-
-
-% There is a duplicate replication potentially from a different db and doc.
-% Write permanent failure to doc.
-t_already_running_other_db_other_doc() ->
-   ?_test(begin
-       mock_already_running(<<"otherdb">>, ?DOC2),
-       ?assertEqual(ok, process_update(?DB, change())),
-       ?assert(did_not_add_job()),
-       ?assert(updated_doc_with_failed_state())
-   end).
-
-% There is a duplicate replication potentially from same db and different doc.
-% Write permanent failure to doc.
-t_already_running_other_doc_same_db() ->
-   ?_test(begin
-       mock_already_running(?DB, ?DOC2),
-       ?assertEqual(ok, process_update(?DB, change())),
-       ?assert(did_not_add_job()),
-       ?assert(updated_doc_with_failed_state())
+       ?assertEqual(ok, process_change(?DB, change())),
+       ?assert(did_not_spawn_worker())
    end).
 
 
@@ -304,33 +475,29 @@ setup() ->
     meck:expect(couch_log, notice, 2, ok),
     meck:expect(couch_log, warning, 2, ok),
     meck:expect(couch_log, error, 2, ok),
+    meck:expect(config, get, fun(_, _, Default) -> Default end),
     meck:expect(couch_replicator_clustering, owner, 2, node()),
+    meck:expect(couch_replicator_doc_processor_worker, spawn_worker, 3, wref),
     meck:expect(couch_replicator_scheduler, remove_job, 1, ok),
-    meck:expect(couch_replicator_scheduler, add_job, 1, ok),
     meck:expect(couch_replicator_docs, remove_state_fields, 2, ok),
     meck:expect(couch_replicator_docs, update_failed, 3, ok),
-    meck:expect(couch_replicator_docs, parse_rep_doc,
-        fun({DocProps}) ->
-            #rep{id = ?R1, doc_id = get_json_value(<<"_id">>, DocProps)}
-        end).
+    {ok, Pid} = start_link(),
+    Pid.
 
 
-teardown(_) ->
+teardown(Pid) ->
+    unlink(Pid),
+    exit(Pid, kill),
     meck:unload().
-
-
-mock_already_running(DbName, DocId) ->
-    meck:expect(couch_replicator_scheduler, rep_state,
-         fun(RepId) -> #rep{id = RepId, doc_id = DocId, db_name = DbName} end).
 
 
 removed_state_fields() ->
     meck:called(couch_replicator_docs, remove_state_fields, [?DB, ?DOC1]).
 
 
-added_job() ->
-    meck:called(couch_replicator_scheduler, add_job, [
-        #rep{id = ?R1, db_name = ?DB, doc_id = ?DOC1}]).
+started_worker(Id) ->
+    meck:called(couch_replicator_doc_processor_worker, spawn_worker,
+        [Id, '_', '_']).
 
 
 removed_job(Id) ->
@@ -341,9 +508,9 @@ did_not_remove_state_fields() ->
     0 == meck:num_calls(couch_replicator_docs, remove_state_fields, '_').
 
 
-did_not_add_job() ->
-    0 == meck:num_calls(couch_replicator_scheduler, add_job, '_').
-
+did_not_spawn_worker() ->
+    0 == meck:num_calls(couch_replicator_doc_processor_worker, spawn_worker,
+        '_').
 
 updated_doc_with_failed_state() ->
     1 == meck:num_calls(couch_replicator_docs, update_failed, '_').

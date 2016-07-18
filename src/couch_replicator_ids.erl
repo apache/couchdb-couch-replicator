@@ -23,6 +23,11 @@
     get_value/3
 ]).
 
+% replication_id/1 and replication_id/2 will attempt to fetch
+% filter code for filtered replications. If fetching or parsing
+% of the remotely fetched filter code fails they throw:
+%  {filter_fetch_error, Error} exception.
+%
 
 replication_id(#rep{options = Options} = Rep) ->
     BaseId = replication_id(Rep, ?REP_ID_VERSION),
@@ -66,62 +71,27 @@ replication_id(#rep{user_ctx = UserCtx} = Rep, 1) ->
 
 maybe_append_filters(Base,
         #rep{source = Source, user_ctx = UserCtx, options = Options}) ->
-    Filter = get_value(filter, Options),
-    DocIds = get_value(doc_ids, Options),
-    Selector = get_value(selector, Options),
     Base2 = Base ++
-        case {Filter, DocIds, Selector} of
-        {undefined, undefined, undefined} ->
+        case couch_replicator_filters:parse(Options) of
+        {ok, nil} ->
             [];
-        {<<"_", _/binary>>, undefined, undefined} ->
-            [Filter, get_value(query_params, Options, {[]})];
-        {_, undefined, undefined} ->
-            [filter_code(Filter, Source, UserCtx),
-                get_value(query_params, Options, {[]})];
-        {undefined, _, undefined} ->
+        {ok, {view, Filter, QueryParams}} ->
+            [Filter, QueryParams];
+        {ok, {user, {Doc, Filter}, QueryParams}} ->
+            case couch_replicator_filters:fetch(Doc, Filter, Source, UserCtx) of
+                {ok, Code} ->
+                    [Code, QueryParams];
+                {error, Error} ->
+                    throw({filter_fetch_error, Error})
+            end;
+        {ok, {docids, DocIds}} ->
             [DocIds];
-        {undefined, undefined, _} ->
-            [ejsort(mango_selector:normalize(Selector))];
-        _ ->
-            throw({error, <<"`selector`, `filter` and `doc_ids` fields are mutually exclusive">>})
+        {ok, {mango, Selector}} ->
+            [Selector];
+        {error, FilterParseError} ->
+            throw({error, FilterParseError})
         end,
     couch_util:to_hex(couch_crypto:hash(md5, term_to_binary(Base2))).
-
-
-filter_code(Filter, Source, UserCtx) ->
-    {DDocName, FilterName} =
-    case re:run(Filter, "(.*?)/(.*)", [{capture, [1, 2], binary}]) of
-    {match, [DDocName0, FilterName0]} ->
-        {DDocName0, FilterName0};
-    _ ->
-        throw({error, <<"Invalid filter. Must match `ddocname/filtername`.">>})
-    end,
-    Db = case (catch couch_replicator_api_wrap:db_open(Source, [{user_ctx, UserCtx}])) of
-    {ok, Db0} ->
-        Db0;
-    DbError ->
-        DbErrorMsg = io_lib:format("Could not open source database `~s`: ~s",
-           [couch_replicator_api_wrap:db_uri(Source), couch_util:to_binary(DbError)]),
-        throw({error, iolist_to_binary(DbErrorMsg)})
-    end,
-    try
-        Body = case (catch couch_replicator_api_wrap:open_doc(
-            Db, <<"_design/", DDocName/binary>>, [ejson_body])) of
-        {ok, #doc{body = Body0}} ->
-            Body0;
-        DocError ->
-            DocErrorMsg = io_lib:format(
-                "Couldn't open document `_design/~s` from source "
-                "database `~s`: ~s", [DDocName, couch_replicator_api_wrap:db_uri(Source),
-                    couch_util:to_binary(DocError)]),
-            throw({error, iolist_to_binary(DocErrorMsg)})
-        end,
-        Code = couch_util:get_nested_json_value(
-            Body, [<<"filters">>, FilterName]),
-        re:replace(Code, [$^, "\s*(.*?)\s*", $$], "\\1", [{return, binary}])
-    after
-        couch_replicator_api_wrap:db_close(Db)
-    end.
 
 
 maybe_append_options(Options, RepOptions) ->
@@ -146,48 +116,3 @@ get_rep_endpoint(_UserCtx, #httpdb{url=Url, headers=Headers, oauth=OAuth}) ->
     end;
 get_rep_endpoint(UserCtx, <<DbName/binary>>) ->
     {local, DbName, UserCtx}.
-
-
-% Sort an EJSON object's properties to attempt
-% to generate a unique representation. This is used
-% to reduce the chance of getting different
-% replication checkpoints for the same Mango selector
-ejsort({V})->
-    ejsort_props(V, []);
-ejsort(V) when is_list(V) ->
-    ejsort_array(V, []);
-ejsort(V) ->
-    V.
-
-ejsort_props([], Acc)->
-    {lists:keysort(1, Acc)};
-ejsort_props([{K, V}| R], Acc) ->
-    ejsort_props(R, [{K, ejsort(V)} | Acc]).
-
-ejsort_array([], Acc)->
-    lists:reverse(Acc);
-ejsort_array([V | R], Acc) ->
-    ejsort_array(R, [ejsort(V) | Acc]).
-
-
--ifdef(TEST).
-
--include_lib("eunit/include/eunit.hrl").
-
-ejsort_basic_values_test() ->
-    ?assertEqual(ejsort(0), 0),
-    ?assertEqual(ejsort(<<"a">>), <<"a">>),
-    ?assertEqual(ejsort(true), true),
-    ?assertEqual(ejsort([]), []),
-    ?assertEqual(ejsort({[]}), {[]}).
-
-ejsort_compound_values_test() ->
-    ?assertEqual(ejsort([2, 1, 3 ,<<"a">>]), [2, 1, 3, <<"a">>]),
-    Ej1 = {[{<<"a">>, 0}, {<<"c">>, 0},  {<<"b">>, 0}]},
-    Ej1s =  {[{<<"a">>, 0}, {<<"b">>, 0}, {<<"c">>, 0}]},
-    ?assertEqual(ejsort(Ej1), Ej1s),
-    Ej2 = {[{<<"x">>, Ej1}, {<<"z">>, Ej1}, {<<"y">>, [Ej1, Ej1]}]},
-    ?assertEqual(ejsort(Ej2),
-        {[{<<"x">>, Ej1s}, {<<"y">>, [Ej1s, Ej1s]}, {<<"z">>, Ej1s}]}).
-
--endif.

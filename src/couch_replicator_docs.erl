@@ -13,12 +13,14 @@
 -module(couch_replicator_docs).
 
 -export([parse_rep_doc/1, parse_rep_doc/2]).
+-export([parse_rep_doc_without_id/1, parse_rep_doc_without_id/2]).
 -export([before_doc_update/2, after_doc_read/2]).
 -export([ensure_rep_db_exists/0, ensure_rep_ddoc_exists/1]).
 -export([
     remove_state_fields/2,
     update_doc_completed/3,
-    update_failed/3
+    update_failed/3,
+    update_rep_id/1
 ]).
 
 -define(REP_DB_NAME, <<"_replicator">>).
@@ -124,10 +126,31 @@ ensure_rep_ddoc_exists(RepDb, DDocId) ->
     end.
 
 
+% Note: parse_rep_doc can handle filtered replications. During parsing of the
+% replication doc it will make possibly remote http requests to the source
+% database. If failure or parsing of filter docs fails, parse_doc throws a
+% {filter_fetch_error, Error} excation. This exception should be considered transient
+% in respect to the contents of the document itself, since it depends on
+% netowrk availability of the source db and other factors.
 -spec parse_rep_doc({[_]}) -> #rep{}.
 parse_rep_doc(RepDoc) ->
     {ok, Rep} = try
         parse_rep_doc(RepDoc, rep_user_ctx(RepDoc))
+    catch
+    throw:{error, Reason} ->
+        throw({bad_rep_doc, Reason});
+    throw:{filter_fetch_error, Reason} ->
+        throw({filter_fetch_error, Reason});
+    Tag:Err ->
+        throw({bad_rep_doc, to_binary({Tag, Err})})
+    end,
+    Rep.
+
+
+-spec parse_rep_doc_without_id({[_]}) -> #rep{}.
+parse_rep_doc_without_id(RepDoc) ->
+    {ok, Rep} = try
+        parse_rep_doc_without_id(RepDoc, rep_user_ctx(RepDoc))
     catch
     throw:{error, Reason} ->
         throw({bad_rep_doc, Reason});
@@ -138,46 +161,57 @@ parse_rep_doc(RepDoc) ->
 
 
 -spec parse_rep_doc({[_]}, #user_ctx{}) -> {ok, #rep{}}.
-parse_rep_doc({Props}, UserCtx) ->
+parse_rep_doc(Doc, UserCtx) ->
+    {ok, Rep} = parse_rep_doc_without_id(Doc, UserCtx),
+    {ok, update_rep_id(Rep)}.
+
+
+-spec parse_rep_doc_without_id({[_]}, #user_ctx{}) -> {ok, #rep{}}.
+parse_rep_doc_without_id({Props}, UserCtx) ->
     ProxyParams = parse_proxy_params(get_value(<<"proxy">>, Props, <<>>)),
-    Options = make_options(Props),
-    case get_value(cancel, Options, false) andalso
-        (get_value(id, Options, nil) =/= nil) of
+    Opts = make_options(Props),
+    case get_value(cancel, Opts, false) andalso
+        (get_value(id, Opts, nil) =/= nil) of
     true ->
-        {ok, #rep{options = Options, user_ctx = UserCtx}};
+        {ok, #rep{options = Opts, user_ctx = UserCtx}};
     false ->
         Source = parse_rep_db(get_value(<<"source">>, Props),
-                              ProxyParams, Options),
+                              ProxyParams, Opts),
         Target = parse_rep_db(get_value(<<"target">>, Props),
-                              ProxyParams, Options),
-
-
-        {RepType, View} = case get_value(<<"filter">>, Props) of
-                <<"_view">> ->
-                    {QP}  = get_value(query_params, Options, {[]}),
-                    ViewParam = get_value(<<"view">>, QP),
-                    View1 = case re:split(ViewParam, <<"/">>) of
-                        [DName, ViewName] ->
-                            {<< "_design/", DName/binary >>, ViewName};
-                        _ ->
-                            throw({bad_request, "Invalid `view` parameter."})
-                    end,
-                    {view, View1};
-                _ ->
-                    {db, nil}
-            end,
-
+                              ProxyParams, Opts),
+        {Type, View} = case couch_replicator_filters:view_type(Props, Opts) of
+        {error, Error} ->
+            throw({bad_request, Error});
+        Result ->
+            Result
+        end,
         Rep = #rep{
             source = Source,
             target = Target,
-            options = Options,
+            options = Opts,
             user_ctx = UserCtx,
-            type = RepType,
+            type = Type,
             view = View,
             doc_id = get_value(<<"_id">>, Props, null)
         },
-        {ok, Rep#rep{id = couch_replicator_ids:replication_id(Rep)}}
+        % Check if can parse filter code, if not throw exception
+        case couch_replicator_filters:parse(Opts) of
+        {error, FilterError} ->
+            throw({error, FilterError});
+        {ok, _Filter} ->
+             ok
+        end,
+        {ok, Rep}
     end.
+
+
+% Update a #rep{} record with a replication_id. Calculating the id might involve
+% fetching a filter from the source db, and so it could fail intermetently.
+% In case of a failure to fetch the filter this function will throw a
+%  `{filter_fetch_error, Reason} exception.
+update_rep_id(Rep) ->
+    RepId = couch_replicator_ids:replication_id(Rep),
+    Rep#rep{id = RepId}.
 
 
 update_rep_doc(RepDbName, RepDocId, KVs) ->

@@ -25,3 +25,15 @@
 }).
 
 -type rep_id() :: {string(), string()}.
+-type db_doc_id() :: {binary(), binary() | '_'}.
+-type seconds() :: non_neg_integer().
+-type rep_start_result() ::
+    {ok, rep_id()} |
+    {temporary_error, binary()} |
+    {permanent_failure, binary()}.
+
+
+-record(doc_worker_result, {
+    id :: db_doc_id(),
+    result :: rep_start_result()
+}).
