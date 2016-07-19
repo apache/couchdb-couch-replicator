@@ -109,10 +109,17 @@ ensure_rep_ddoc_exists(RepDb, DDocId) ->
         {ok, _Doc} ->
             ok;
         _ ->
+            TerminalViewEJson = {[
+                {<<"map">>, ?REP_DB_TERMINAL_STATE_VIEW_MAP_FUN},
+                {<<"reduce">>, <<"_count">>}
+            ]},
             DDoc = couch_doc:from_json_obj({[
                 {<<"_id">>, DDocId},
                 {<<"language">>, <<"javascript">>},
-                {<<"validate_doc_update">>, ?REP_DB_DOC_VALIDATE_FUN}
+                {<<"validate_doc_update">>, ?REP_DB_DOC_VALIDATE_FUN},
+                {<<"views">>, {[
+                    {<<"terminal_states">>, TerminalViewEJson}
+                ]}}
             ]}),
             try
                 {ok, _} = save_rep_doc(RepDb, DDoc),
