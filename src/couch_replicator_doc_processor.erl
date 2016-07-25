@@ -104,7 +104,7 @@ process_change(DbName, {Change}) ->
             couch_replicator_docs:remove_state_fields(DbName, DocId),
             ok = process_updated(Id, JsonRepDoc);
         <<"completed">> ->
-            ok;
+            ok = gen_server:call(?MODULE, {completed, Id}, infinity);
         <<"error">> ->
             % Handle replications started from older versions of replicator
             % which wrote transient errors to replication docs
@@ -165,6 +165,10 @@ handle_call({updated, Id, Rep, Filter}, _From, State) ->
 
 handle_call({removed, Id}, _From, State) ->
     ok = removed_doc(Id),
+    {reply, ok, State};
+
+handle_call({completed, Id}, _From, State) ->
+    true = ets:delete(?MODULE, Id),
     {reply, ok, State};
 
 handle_call({clean_up_replications, DbName}, _From, State) ->
@@ -369,6 +373,7 @@ doc_processor_test_() ->
             t_deleted_change(),
             t_triggered_change(),
             t_completed_change(),
+            t_active_replication_completed(),
             t_error_change(),
             t_failed_change(),
             t_change_for_different_node(),
@@ -421,6 +426,20 @@ t_completed_change() ->
         ?assert(did_not_remove_state_fields()),
         ?assertNot(ets:member(?MODULE, {?DB, ?DOC1})),
         ?assert(did_not_spawn_worker())
+    end).
+
+
+% Completed change comes for what used to be an active job. In this case
+% remove entry from doc_processor's ets (because there is no linkage or
+% callback mechanism for scheduler to tell doc_processsor a replication just
+% completed).
+t_active_replication_completed() ->
+    ?_test(begin
+        ?assertEqual(ok, process_change(?DB, change())),
+        ?assert(ets:member(?MODULE, {?DB, ?DOC1})),
+        ?assertEqual(ok, process_change(?DB, change(<<"completed">>))),
+        ?assert(did_not_remove_state_fields()),
+        ?assertNot(ets:member(?MODULE, {?DB, ?DOC1}))
     end).
 
 
