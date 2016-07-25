@@ -14,6 +14,7 @@
 -behaviour(couch_multidb_changes).
 
 -export([start_link/0]).
+-export([docs/0]).
 
 % multidb changes callback
 -export([db_created/2, db_deleted/2, db_found/2, db_change/3]).
@@ -350,6 +351,47 @@ get_worker_wait(#rdoc{state = unscheduled}) ->
     0.
 
 
+% _scheduler/docs HTTP endpoint helpers
+
+-spec docs() -> [{[_]}] | [].
+docs() ->
+    ets:foldl(fun(RDoc, Acc) -> [ejson_doc(RDoc) | Acc]  end, [], ?MODULE).
+
+
+-spec ejson_state_info(binary() | nil) -> binary() | null.
+ejson_state_info(nil) ->
+    null;
+ejson_state_info(Info) when is_binary(Info) ->
+    Info.
+
+
+-spec ejson_rep_id(rep_id() | nil) -> binary() | null.
+ejson_rep_id(nil) ->
+    null;
+ejson_rep_id({BaseId, Ext}) ->
+    iolist_to_binary([BaseId, Ext]).
+
+
+-spec ejson_doc(#rdoc{}) -> {[_]}.
+ejson_doc(RDoc) ->
+    #rdoc{
+       id = {DbName, DocId},
+       state = RepState,
+       info = StateInfo,
+       rid = RepId,
+       errcnt = ErrorCount
+    } = RDoc,
+    {[
+        {doc_id, DocId},
+        {database, mem3:dbname(DbName)},
+        {id, ejson_rep_id(RepId)},
+        {state, RepState},
+        {info, ejson_state_info(StateInfo)},
+        {error_count, ErrorCount},
+        {node, node()}
+    ]}.
+
+
 
 -ifdef(TEST).
 
@@ -377,7 +419,8 @@ doc_processor_test_() ->
             t_error_change(),
             t_failed_change(),
             t_change_for_different_node(),
-            t_change_when_cluster_unstable()
+            t_change_when_cluster_unstable(),
+            t_ejson_docs()
         ]
     }.
 
@@ -484,6 +527,27 @@ t_change_when_cluster_unstable() ->
        ?assertEqual(ok, process_change(?DB, change())),
        ?assert(did_not_spawn_worker())
    end).
+
+
+% Check if docs/0 function produces expected ejson after adding a job
+t_ejson_docs() ->
+    ?_test(begin
+        ?assertEqual(ok, process_change(?DB, change())),
+        ?assert(ets:member(?MODULE, {?DB, ?DOC1})),
+        EJsonDocs = docs(),
+        ?assertMatch([{[_|_]}], EJsonDocs),
+        [{DocProps}] = EJsonDocs,
+        ExpectedProps = [
+            {database, ?DB},
+            {doc_id, ?DOC1},
+            {error_count, 0},
+            {id, null},
+            {info, null},
+            {node, node()},
+            {state, unscheduled}
+        ],
+        ?assertEqual(ExpectedProps, lists:usort(DocProps))
+    end).
 
 
 % Test helper functions

@@ -173,7 +173,7 @@
 -define(REP_DB_TERMINAL_STATE_VIEW_MAP_FUN, <<"
     function(doc) {
         if (typeof doc._replication_state === 'string') {
-            emit(doc._replication_state, null);
+            emit(doc._replication_state, doc._replication_state_reason);
         }
     }
 ">>).

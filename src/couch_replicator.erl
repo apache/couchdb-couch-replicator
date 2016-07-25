@@ -13,14 +13,20 @@
 -module(couch_replicator).
 
 -export([replicate/2, ensure_rep_db_exists/0]).
+-export([stream_active_docs_info/2, stream_terminal_docs_info/3]).
 
 -include_lib("couch/include/couch_db.hrl").
 -include("couch_replicator.hrl").
+-include_lib("couch_mrview/include/couch_mrview.hrl").
 
 -import(couch_util, [
     get_value/2,
     get_value/3
 ]).
+
+
+-type user_doc_cb() :: fun(({[_]}, any()) -> any()).
+-type query_acc() :: {binary(), user_doc_cb(), any()}.
 
 
 -spec replicate({[_]}, #user_ctx{}) ->
@@ -129,3 +135,51 @@ cancel_replication(RepId, #user_ctx{name = Name, roles = Roles}) ->
             {error, not_found}
         end
      end.
+
+
+-spec stream_terminal_docs_info(binary(), user_doc_cb(), any()) -> any().
+stream_terminal_docs_info(Db, Cb, UserAcc) ->
+    DDoc = <<"_replicator">>,
+    View = <<"terminal_states">>,
+    QueryCb = fun handle_replicator_doc_query/2,
+    Args = #mrargs{view_type = map, reduce = false},
+    Acc = {Db, Cb, UserAcc},
+    try fabric:query_view(Db, DDoc, View, QueryCb, Acc, Args) of
+    {ok, {Db, Cb, UserAcc1}} ->
+        UserAcc1
+    catch error:database_does_not_exist ->
+        UserAcc
+    end.
+
+
+% Streaming doesn't save memory much here but it is used to provided a similar
+% API as the terminal docs, which is streaming data from the view
+-spec stream_active_docs_info(user_doc_cb(), any()) -> any().
+stream_active_docs_info(Cb, UserAcc) ->
+    {Replies, _BadNodes} = rpc:multicall(couch_replicator_doc_processor, docs, []),
+    lists:foldl(Cb, UserAcc, lists:append(Replies)).
+
+
+-spec handle_replicator_doc_query
+    ({row, [_]} , query_acc()) -> {ok, query_acc()};
+    ({error, any()}, query_acc()) -> {error, any()};
+    ({meta, any()}, query_acc()) -> {ok,  query_acc()};
+    (complete, query_acc()) -> {ok, query_acc()}.
+handle_replicator_doc_query({row, Props}, {Db, Cb, UserAcc}) ->
+    DocId = couch_util:get_value(id, Props),
+    State = couch_util:get_value(key, Props),
+    StateInfo = couch_util:get_value(value, Props),
+    EjsonInfo = {[
+        {doc_id, DocId},
+        {database, Db},
+        {id, null},
+        {state, State},
+        {info, StateInfo}
+    ]},
+    {ok, {Db, Cb, Cb(EjsonInfo, UserAcc)}};
+handle_replicator_doc_query({error, Reason}, _Acc) ->
+    {error, Reason};
+handle_replicator_doc_query({meta, _Meta}, Acc) ->
+    {ok, Acc};
+handle_replicator_doc_query(complete, Acc) ->
+    {stop, Acc}.
