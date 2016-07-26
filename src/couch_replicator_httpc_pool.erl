@@ -147,9 +147,15 @@ code_change(_OldVsn, #state{}=State, _Extra) ->
     {ok, State}.
 
 
-terminate(_Reason, State) ->
-    lists:foreach(fun ibrowse_http_client:stop/1, State#state.free),
-    lists:foreach(fun ibrowse_http_client:stop/1, State#state.busy).
+terminate(_Reason, #state{free=Free, busy=Busy}) ->
+    % ibrowse_http_client stop can take up to 5 seconds to close an ssl socket
+    % (if it times out after five, it brutally kills process)
+    [begin
+        unlink(Con),
+        spawn(ibrowse_http_client, stop, [Con])
+    end || Con <- Free ++ Busy],
+    ok.
+
 
 monitor_client(Callers, Worker, {ClientPid, _}) ->
     [{Worker, erlang:monitor(process, ClientPid)} | Callers].
