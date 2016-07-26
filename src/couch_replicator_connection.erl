@@ -80,6 +80,7 @@ handle_call({acquire, URL}, From, State) ->
                 '$end_of_table' ->
                     {reply, {error, all_allocated}, State};
                 {[Worker], _Cont} ->
+                    couch_stats:increment_counter([couch_replicator, connection, acquires]),
                     ets:insert(?MODULE, Worker#connection{mref=monitor(process, Pid)}),
                     {reply, {ok, Worker#connection.worker}, State}
             end
@@ -90,6 +91,7 @@ handle_call({create, URL, Worker}, From, State) ->
     case ibrowse_lib:parse_url(URL) of
         #url{host=Host, port=Port} ->
             link(Worker),
+            couch_stats:increment_counter([couch_replicator, connection, creates]),
             true = ets:insert_new(
                 ?MODULE,
                 #connection{host=Host, port=Port, worker=Worker, mref=monitor(process, Pid)}
@@ -99,6 +101,7 @@ handle_call({create, URL, Worker}, From, State) ->
 
 
 handle_cast({relinquish, WorkerPid}, State) ->
+    couch_stats:increment_counter([couch_replicator, connection, relinquishes]),
     case ets:lookup(?MODULE, WorkerPid) of
         [Worker] ->
             case Worker#connection.mref of
@@ -119,11 +122,13 @@ handle_cast({connection_close_interval, V}, State) ->
 
 % owner crashed
 handle_info({'DOWN', Ref, process, _Pid, _Reason}, State) ->
+    couch_stats:increment_counter([couch_replicator, connection, owner_crashes]),
     ets:match_delete(?MODULE, #connection{mref=Ref, _='_'}),
     {noreply, State};
 
 % worker crashed
 handle_info({'EXIT', Pid, Reason}, State) ->
+    couch_stats:increment_counter([couch_replicator, connection, worker_crashes]),
     case ets:lookup(?MODULE, Pid) of
         [] ->
             ok;
@@ -148,6 +153,7 @@ handle_info(close_idle_connections, State) ->
     } = State,
     Conns = ets:match_object(?MODULE, #connection{mref=undefined, _='_'}),
     lists:foreach(fun(Conn) ->
+        couch_stats:increment_counter([couch_replicator, connection, closes]),
         delete_worker(Conn)
     end, Conns),
     {ok, cancel} = timer:cancel(Timer),
