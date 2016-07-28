@@ -13,15 +13,15 @@
 -define(REP_ID_VERSION, 3).
 
 -record(rep, {
-    id,
-    source,
-    target,
-    options,
-    user_ctx,
-    type = db,
-    view = nil,
-    doc_id,
-    db_name = null
+    id :: rep_id() | '_',
+    source :: any() | '_',
+    target :: any() | '_',
+    options :: [_] | '_',
+    user_ctx :: any() | '_',
+    type = db :: atom() | '_',
+    view = nil :: any() | '_',
+    doc_id :: any() | '_',
+    db_name = null :: null | binary() | '_'
 }).
 
 -type rep_id() :: {string(), string()}.

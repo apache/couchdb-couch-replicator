@@ -48,11 +48,11 @@
 -define(DEFAULT_SCHEDULER_INTERVAL, 60000).
 -record(state, {interval, timer, max_jobs, max_churn, max_history}).
 -record(job, {
-          id :: job_id(),
-          rep :: #rep{},
-          pid :: undefined | pid(),
-          monitor :: undefined | reference(),
-          history :: history()}).
+          id :: job_id() | '$1' | '_',
+          rep :: #rep{} | '_',
+          pid :: undefined | pid() | '$1' | '_',
+          monitor :: undefined | reference() | '_',
+          history :: history() | '_'}).
 
 -record(stats_acc, {
           now  :: erlang:timestamp(),

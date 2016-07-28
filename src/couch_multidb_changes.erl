@@ -171,7 +171,7 @@ register_with_event_server(Server) ->
     Ref.
 
 
--spec db_callback(any(), atom(), #state{}) -> #state{}.
+-spec db_callback(created | deleted | updated, binary(), #state{}) -> #state{}.
 db_callback(created, DbName, #state{mod = Mod, ctx = Ctx} = State) ->
     State#state{ctx = Mod:db_created(DbName, Ctx)};
 

@@ -39,14 +39,14 @@
 
 
 -record(rdoc, {
-    id :: db_doc_id(),
-    state :: repstate(),
-    rep :: #rep{} | nil,
-    rid :: rep_id() | nil,
-    filter :: filter_type(),
-    info :: binary() | nil,
-    errcnt :: non_neg_integer(),
-    worker :: reference() | nil
+    id :: db_doc_id() | '_' | {any(), '_'},
+    state :: repstate() | '_',
+    rep :: #rep{} | nil | '_',
+    rid :: rep_id() | nil | '_',
+    filter :: filter_type() | '_',
+    info :: binary() | nil | '_',
+    errcnt :: non_neg_integer() | '_',
+    worker :: reference() | nil | '_'
 }).
 
 
@@ -186,7 +186,7 @@ handle_info({'DOWN', Ref, _, _, #doc_worker_result{id = Id, result = Res}},
     ok = worker_returned(Ref, Id, Res),
     {noreply, State};
 
-handle_info(Msg, State) ->
+handle_info(_Msg, State) ->
     {noreply, State}.
 
 
