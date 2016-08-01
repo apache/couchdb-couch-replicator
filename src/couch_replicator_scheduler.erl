@@ -271,12 +271,54 @@ handle_config_terminate(Self, _, _) ->
 
 %% private functions
 
+% Return up to a given number of oldest, not recently crashed jobs. Try to be
+% memory efficient and use ets:foldl to accumulate jobs.
+-spec pending_jobs(non_neg_integer()) -> [#job{}].
+pending_jobs(0) ->
+    % Handle this case as user could set max_churn to 0. If this is passed to
+    % other function clause it will crash as gb_sets:largest assumes set is not
+    % empty.
+    [];
+
+pending_jobs(Count) when is_integer(Count), Count > 0 ->
+    Set0 = gb_sets:new(),  % [{LastStart, Job},...]
+    Now = os:timestamp(),
+    {Set1, _, _} = ets:foldl(fun pending_fold/2, {Set0, Now, Count}, ?MODULE),
+    [Job || {_Started, Job} <- gb_sets:to_list(Set1)].
+
+
+pending_fold(Job, {Set, Now, Count}) ->
+    Set1 = case {not_recently_crashed(Job, Now), gb_sets:size(Set) >= Count} of
+        {true, true} ->
+             % Job is healthy but already reached accumulated limit, so might
+             % have to replace one of the accumulated jobs
+             pending_maybe_replace(Job, Set);
+        {true, false} ->
+             % Job is healthy and we haven't reached the limit, so add job
+             % to accumulator
+             gb_sets:add_element({last_started(Job), Job}, Set);
+        {false, _} ->
+             % This jobs is not healthy (has crashed too recently), so skip it.
+             Set
+    end,
+    {Set1, Now, Count}.
+
+
+% Replace Job in the accumulator if it is older than youngest job there.
+pending_maybe_replace(Job, Set) ->
+    Started = last_started(Job),
+    {Youngest, YoungestJob} = gb_sets:largest(Set),
+    case Started < Youngest of
+        true ->
+            Set1 = gb_sets:delete({Youngest, YoungestJob}, Set),
+            gb_sets:add_element({Started, Job}, Set1);
+        false ->
+            Set
+    end.
+
+
 start_jobs(Count, State) ->
-    Runnable0 = pending_jobs(),
-    Runnable1 = lists:sort(fun oldest_job_first/2, Runnable0),
-    Runnable2 = lists:filter(fun not_recently_crashed/1, Runnable1),
-    Runnable3 = lists:sublist(Runnable2, Count),
-    [start_job_int(Job, State) || Job <- Runnable3],
+    [start_job_int(Job, State) || Job <- pending_jobs(Count)],
     ok.
 
 
@@ -294,7 +336,7 @@ oldest_job_first(#job{} = A, #job{} = B) ->
     last_started(A) =< last_started(B).
 
 
-not_recently_crashed(#job{} = Job) ->
+not_recently_crashed(#job{} = Job, Now) ->
     case Job#job.history of
         [{added, _When}] ->
             true;
@@ -305,7 +347,7 @@ not_recently_crashed(#job{} = Job) ->
                 [] ->
                     true;
                 [{{crashed, _Reason}, When} | _] ->
-                    timer:now_diff(os:timestamp(), When) >= backoff_micros(length(Crashes))
+                    timer:now_diff(Now, When) >= backoff_micros(length(Crashes))
             end
     end.
 
@@ -381,9 +423,7 @@ pending_job_count() ->
     ets:select_count(?MODULE, [{#job{pid=undefined, _='_'}, [], [true]}]).
 
 
--spec pending_jobs() -> [#job{}].
-pending_jobs() ->
-    ets:match_object(?MODULE, #job{pid=undefined, _='_'}).
+
 
 
 -spec job_by_pid(pid()) -> {ok, #job{}} | {error, not_found}.
@@ -665,16 +705,6 @@ last_started_test_() ->
     ]].
 
 
-not_recently_crashed_test_() ->
-    [?_assertEqual(R, not_recently_crashed(job(H))) || {R, H} <- [
-        {true, [added()]},
-        {true, [stopped()]},
-        {true, [crashed(0)]},
-        {false, [crashed(os:timestamp())]},
-        {true, [stopped(), crashed(os:timestamp())]}
-    ]].
-
-
 oldest_job_first_test() ->
     J0 = job([crashed()]),
     J1 = job([started(1)]),
@@ -692,6 +722,8 @@ scheduler_test_() ->
         fun setup/0,
         fun teardown/1,
         [
+            t_pending_jobs_simple(),
+            t_pending_jobs_skip_crashed(),
             t_one_job_starts(),
             t_no_jobs_start_if_max_is_0(),
             t_one_job_starts_if_max_is_1(),
@@ -712,6 +744,32 @@ scheduler_test_() ->
             t_if_excess_is_trimmed_rotation_doesnt_happen()
          ]
     }.
+
+
+t_pending_jobs_simple() ->
+   ?_test(begin
+        Job1 = oneshot(1),
+        Job2 = oneshot(2),
+        setup_jobs([Job2, Job1]),
+        ?assertEqual([], pending_jobs(0)),
+        ?assertEqual([Job1], pending_jobs(1)),
+        ?assertEqual([Job1, Job2], pending_jobs(2)),
+        ?assertEqual([Job1, Job2], pending_jobs(3))
+    end).
+
+
+t_pending_jobs_skip_crashed() ->
+   ?_test(begin
+        Job = oneshot(1),
+        History = [crashed(os:timestamp()) | Job#job.history],
+        Job1 = Job#job{history = History},
+        Job2 = oneshot(2),
+        Job3 = oneshot(3),
+        setup_jobs([Job2, Job1, Job3]),
+        ?assertEqual([Job2], pending_jobs(1)),
+        ?assertEqual([Job2, Job3], pending_jobs(2)),
+        ?assertEqual([Job2, Job3], pending_jobs(3))
+    end).
 
 
 t_one_job_starts() ->
