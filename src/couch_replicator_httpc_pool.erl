@@ -31,8 +31,7 @@
 -record(state, {
     url,
     limit,                  % max # of workers allowed
-    free = [],              % free workers (connections)
-    busy = [],              % busy workers (connections)
+    conns = [],
     waiting = queue:new(),  % blocked clients waiting for a worker
     callers = []            % clients who've been given a worker
 }).
@@ -70,23 +69,17 @@ handle_call(get_worker, From, State) ->
         callers = Callers,
         url = Url,
         limit = Limit,
-        busy = Busy,
-        free = Free
+        conns = Conns
     } = State,
-    case length(Busy) >= Limit of
+    case length(Conns) >= Limit of
     true ->
         {noreply, State#state{waiting = queue:in(From, Waiting)}};
     false ->
-        case Free of
-        [] ->
-           {ok, Worker} = ibrowse:spawn_link_worker_process(Url),
-           Free2 = Free;
-        [Worker | Free2] ->
-           ok
-        end,
+        % If the call to acquire fails, the worker pool will crash with a
+        % badmatch.
+        {ok, Worker} = couch_replicator_connection:acquire(Url),
         NewState = State#state{
-            free = Free2,
-            busy = [Worker | Busy],
+            conns = [Worker | Conns],
             callers = monitor_client(Callers, Worker, From)
         },
         {reply, {ok, Worker}, NewState}
@@ -104,35 +97,29 @@ handle_cast({release_worker, Worker}, State) ->
 handle_info({'EXIT', Pid, _Reason}, State) ->
     #state{
         url = Url,
-        busy = Busy,
-        free = Free,
+        conns = Conns,
         waiting = Waiting,
         callers = Callers
     } = State,
     NewCallers0 = demonitor_client(Callers, Pid),
-    case Free -- [Pid] of
-    Free ->
-        case Busy -- [Pid] of
-        Busy ->
+    case Conns -- [Pid] of
+        Conns ->
             {noreply, State#state{callers = NewCallers0}};
-        Busy2 ->
+        Conns2 ->
             case queue:out(Waiting) of
-            {empty, _} ->
-                {noreply, State#state{busy = Busy2, callers = NewCallers0}};
-            {{value, From}, Waiting2} ->
-                {ok, Worker} = ibrowse:spawn_link_worker_process(Url),
-                NewCallers1 = monitor_client(NewCallers0, Worker, From),
-                gen_server:reply(From, {ok, Worker}),
-                NewState = State#state{
-                    busy = [Worker | Busy2],
-                    waiting = Waiting2,
-                    callers = NewCallers1
-                },
-                {noreply, NewState}
+                {empty, _} ->
+                    {noreply, State#state{conns = Conns2, callers = NewCallers0}};
+                {{value, From}, Waiting2} ->
+                    {ok, Worker} = couch_replicator_connection:acquire(Url),
+                    NewCallers1 = monitor_client(NewCallers0, Worker, From),
+                    gen_server:reply(From, {ok, Worker}),
+                    NewState = State#state{
+                        conns = [Worker | Conns2],
+                        waiting = Waiting2,
+                        callers = NewCallers1
+                    },
+                    {noreply, NewState}
             end
-        end;
-    Free2 ->
-        {noreply, State#state{free = Free2, callers = NewCallers0}}
     end;
 
 handle_info({'DOWN', Ref, process, _, _}, #state{callers = Callers} = State) ->
@@ -147,15 +134,8 @@ code_change(_OldVsn, #state{}=State, _Extra) ->
     {ok, State}.
 
 
-terminate(_Reason, #state{free=Free, busy=Busy}) ->
-    % ibrowse_http_client stop can take up to 5 seconds to close an ssl socket
-    % (if it times out after five, it brutally kills process)
-    [begin
-        unlink(Con),
-        spawn(ibrowse_http_client, stop, [Con])
-    end || Con <- Free ++ Busy],
+terminate(_Reason, _State) ->
     ok.
-
 
 monitor_client(Callers, Worker, {ClientPid, _}) ->
     [{Worker, erlang:monitor(process, ClientPid)} | Callers].
@@ -173,22 +153,20 @@ release_worker_internal(Worker, State) ->
     #state{waiting = Waiting, callers = Callers} = State,
     NewCallers0 = demonitor_client(Callers, Worker),
     case is_process_alive(Worker) andalso
-        lists:member(Worker, State#state.busy) of
+        lists:member(Worker, State#state.conns) of
     true ->
-        case queue:out(Waiting) of
+        Conns = case queue:out(Waiting) of
         {empty, Waiting2} ->
             NewCallers1 = NewCallers0,
-            Busy2 = State#state.busy -- [Worker],
-            Free2 = [Worker | State#state.free];
+            couch_replicator_connection:relinquish(Worker),
+            State#state.conns -- [Worker];
         {{value, From}, Waiting2} ->
             NewCallers1 = monitor_client(NewCallers0, Worker, From),
             gen_server:reply(From, {ok, Worker}),
-            Busy2 = State#state.busy,
-            Free2 = State#state.free
+            State#state.conns
         end,
         NewState = State#state{
-           busy = Busy2,
-           free = Free2,
+           conns = Conns,
            waiting = Waiting2,
            callers = NewCallers1
         },
