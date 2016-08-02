@@ -13,12 +13,15 @@
 -module(couch_replicator_connection).
 
 -behavior(gen_server).
+-behavior(config_listener).
 
 -export([start_link/0]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2]).
 -export([code_change/3, terminate/2]).
 
 -export([acquire/1, relinquish/1]).
+
+-export([handle_config_change/5, handle_config_terminate/3]).
 
 -define(DEFAULT_CLOSE_INTERVAL, 90000).
 
@@ -44,7 +47,8 @@ start_link() ->
 init([]) ->
     process_flag(trap_exit, true),
     ?MODULE = ets:new(?MODULE, [named_table, public, {keypos, #connection.worker}]),
-    Interval = ?DEFAULT_CLOSE_INTERVAL,
+    ok = config:listen_for_changes(?MODULE, self()),
+    Interval = config:get_integer("replicator", "connection_close_interval", ?DEFAULT_CLOSE_INTERVAL),
     {ok, Timer} = timer:send_after(Interval, close_idle_connections),
     {ok, #state{close_interval=Interval, timer=Timer}}.
 
@@ -105,7 +109,12 @@ handle_cast({relinquish, WorkerPid}, State) ->
         [] ->
             ok
     end,
-    {noreply, State}.
+    {noreply, State};
+
+handle_cast({connection_close_interval, V}, State) ->
+    {ok, cancel} = timer:cancel(State#state.timer),
+    {ok, NewTimer} = timer:send_after(V, close_idle_connections),
+    {noreply, State#state{close_interval=V, timer=NewTimer}}.
 
 
 % owner crashed
@@ -160,3 +169,21 @@ delete_worker(Worker) ->
     unlink(Worker#connection.worker),
     spawn(fun() -> ibrowse_http_client:stop(Worker#connection.worker) end),
     ok.
+
+
+handle_config_change("replicator", "connection_close_interval", V, _, Pid) ->
+    ok = gen_server:cast(Pid, {connection_close_interval, list_to_integer(V)}),
+    {ok, Pid};
+
+handle_config_change(_, _, _, _, Pid) ->
+    {ok, Pid}.
+
+
+handle_config_terminate(_, stop, _) ->
+    ok;
+
+handle_config_terminate(Self, _, _) ->
+    spawn(fun() ->
+        timer:sleep(5000),
+        config:listen_for_changes(?MODULE, Self)
+    end).
