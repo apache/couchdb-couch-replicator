@@ -50,6 +50,7 @@ init([]) ->
     ok = config:listen_for_changes(?MODULE, self()),
     Interval = config:get_integer("replicator", "connection_close_interval", ?DEFAULT_CLOSE_INTERVAL),
     {ok, Timer} = timer:send_after(Interval, close_idle_connections),
+    ibrowse:add_config([{inactivity_timeout, Interval}]),
     {ok, #state{close_interval=Interval, timer=Timer}}.
 
 
@@ -117,6 +118,7 @@ handle_cast({relinquish, WorkerPid}, State) ->
 handle_cast({connection_close_interval, V}, State) ->
     {ok, cancel} = timer:cancel(State#state.timer),
     {ok, NewTimer} = timer:send_after(V, close_idle_connections),
+    ibrowse:add_config([{inactivity_timeout, V}]),
     {noreply, State#state{close_interval=V, timer=NewTimer}}.
 
 
