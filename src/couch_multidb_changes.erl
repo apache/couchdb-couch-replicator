@@ -24,6 +24,8 @@
 
 -define(CTX, {user_ctx, #user_ctx{roles=[<<"_admin">>, <<"_replicator">>]}}).
 
+-define(AVG_DELAY_MSEC, 100).
+-define(MAX_DELAY_MSEC, 60000).
 
 -record(state, {
     tid :: ets:tid(),
@@ -251,7 +253,7 @@ scan_all_dbs(Server, DbSuffix) when is_pid(Server) ->
     NormRoot = couch_util:normpath(Root),
     Pat = io_lib:format("~s(\\.[0-9]{10,})?.couch$", [DbSuffix]),
     filelib:fold_files(Root, lists:flatten(Pat), true,
-        fun(Filename, _) ->
+        fun(Filename, Acc) ->
             % shamelessly stolen from couch_server.erl
             NormFilename = couch_util:normpath(Filename),
             case NormFilename -- NormRoot of
@@ -259,9 +261,22 @@ scan_all_dbs(Server, DbSuffix) when is_pid(Server) ->
                 RelativeFilename -> ok
             end,
             DbName = ?l2b(filename:rootname(RelativeFilename, ".couch")),
-            gen_server:cast(Server, {resume_scan, DbName}),
-            ok
-        end, ok).
+            Jitter = jitter(Acc),
+            spawn_link(fun() ->
+                timer:sleep(Jitter),
+                gen_server:cast(Server, {resume_scan, DbName})
+            end),
+            Acc + 1
+        end, 1).
+
+
+% calculate random delay proportional to the number of replications
+% on current node, in order to prevent a stampede:
+%   - when a source with multiple replication targets fails
+%   - when we restart couch_replication_manager
+jitter(N) ->
+    Range = min(2 * N * ?AVG_DELAY_MSEC, ?MAX_DELAY_MSEC),
+    random:uniform(Range).
 
 
 is_design_doc({Change}) ->
