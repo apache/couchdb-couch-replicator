@@ -103,34 +103,51 @@ ensure_rep_ddoc_exists(RepDb) ->
             ok
     end.
 
+
 -spec ensure_rep_ddoc_exists(binary(), binary()) -> ok.
 ensure_rep_ddoc_exists(RepDb, DDocId) ->
     case open_rep_doc(RepDb, DDocId) of
-        {ok, _Doc} ->
-            ok;
-        _ ->
-            TerminalViewEJson = {[
+        {not_found, _Reason} ->
+            {ok, DDoc} = replication_design_doc(DDocId),
+            couch_log:notice("creating replicator ddoc", []),
+            {ok, _Rev} = save_rep_doc(RepDb, DDoc);
+        {ok, Doc} ->
+            {Props} = couch_doc:to_json_obj(Doc, []),
+            case couch_util:get_value(<<"validate_doc_update">>, Props, []) of
+                ?REP_DB_DOC_VALIDATE_FUN ->
+                    ok;
+                _ ->
+                    Props1 = lists:keyreplace(<<"validate_doc_update">>, 1, Props,
+                         {<<"validate_doc_update">>,
+                        ?REP_DB_DOC_VALIDATE_FUN}),
+                    DDoc = couch_doc:from_json_obj({Props1}),
+                    couch_log:notice("updating replicator ddoc", []),
+                    try
+                        {ok, _} = save_rep_doc(RepDb, DDoc)
+                    catch
+                        throw:conflict ->
+                            %% ignore, we'll retry next time
+                            ok
+                    end
+            end
+    end,
+    ok.
+
+
+replication_design_doc(DDocId) ->
+    TerminalViewEJson = {[
                 {<<"map">>, ?REP_DB_TERMINAL_STATE_VIEW_MAP_FUN},
                 {<<"reduce">>, <<"_count">>}
             ]},
-            DDoc = couch_doc:from_json_obj({[
-                {<<"_id">>, DDocId},
-                {<<"language">>, <<"javascript">>},
-                {<<"validate_doc_update">>, ?REP_DB_DOC_VALIDATE_FUN},
-                {<<"views">>, {[
-                    {<<"terminal_states">>, TerminalViewEJson}
-                ]}}
-            ]}),
-            try
-                {ok, _} = save_rep_doc(RepDb, DDoc),
-                ok
-            catch
-                throw:conflict ->
-                    % NFC what to do about this other than
-                    % not kill the process.
-                    ok
-            end
-    end.
+    DocProps = [
+        {<<"_id">>, DDocId},
+        {<<"language">>, <<"javascript">>},
+        {<<"validate_doc_update">>, ?REP_DB_DOC_VALIDATE_FUN},
+        {<<"views">>, {[
+            {<<"terminal_states">>, TerminalViewEJson}
+        ]}}
+   ],
+   {ok, couch_doc:from_json_obj({DocProps})}.
 
 
 % Note: parse_rep_doc can handle filtered replications. During parsing of the
