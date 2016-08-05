@@ -77,18 +77,18 @@ add_job(#rep{} = Rep) when Rep#rep.id /= undefined ->
         id = Rep#rep.id,
         rep = Rep,
         history = [{added, os:timestamp()}]},
-    gen_server:call(?MODULE, {add_job, Job}).
+    gen_server:call(?MODULE, {add_job, Job}, infinity).
 
 
 -spec remove_job(job_id()) -> ok.
 remove_job(Id) ->
-    gen_server:call(?MODULE, {remove_job, Id}).
+    gen_server:call(?MODULE, {remove_job, Id}, infinity).
 
 
 -spec reschedule() -> ok.
 % Trigger a manual reschedule. Used for testing and/or ops.
 reschedule() ->
-    gen_server:call(?MODULE, reschedule).
+    gen_server:call(?MODULE, reschedule, infinity).
 
 
 -spec rep_state(rep_id()) -> #rep{} | nil.
