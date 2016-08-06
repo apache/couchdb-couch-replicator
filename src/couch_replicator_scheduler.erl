@@ -139,13 +139,7 @@ init(_) ->
 handle_call({add_job, Job}, _From, State) ->
     case add_job_int(Job) of
         true ->
-            case running_job_count() of
-                RunningJobs when RunningJobs < State#state.max_jobs ->
-                    start_job_int(Job, State),
-                    update_running_jobs_stats();
-                _ ->
-                    ok
-                end,
+            ok = maybe_start_newly_added_job(Job, State),
             couch_stats:increment_counter([couch_replicator, jobs, adds]),
             TotalJobs = ets:info(?MODULE, size),
             couch_stats:update_gauge([couch_replicator, jobs, total], TotalJobs),
@@ -270,6 +264,22 @@ handle_config_terminate(Self, _, _) ->
 
 
 %% private functions
+
+% Attempt to start a newly added job. First quickly check if total jobs
+% already exceed max jobs, then do a more expensive check which runs a
+% select (an O(n) operation) to check pending jobs specifically.
+-spec maybe_start_newly_added_job(#job{}, #state{}) -> ok.
+maybe_start_newly_added_job(Job, State) ->
+    MaxJobs = State#state.max_jobs,
+    TotalJobs = ets:info(?MODULE, size),
+    case TotalJobs < MaxJobs andalso running_job_count() < MaxJobs of
+        true ->
+            start_job_int(Job, State),
+            update_running_jobs_stats(),
+            ok;
+        false ->
+            ok
+    end.
 
 % Return up to a given number of oldest, not recently crashed jobs. Try to be
 % memory efficient and use ets:foldl to accumulate jobs.
