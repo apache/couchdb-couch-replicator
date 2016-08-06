@@ -31,7 +31,7 @@
     get_json_value/3
 ]).
 
--define(ERROR_MAX_BACKOFF_EXPONENT, 17).  % ~ 1 day on average
+-define(ERROR_MAX_BACKOFF_EXPONENT, 12).  % ~ 1 day on average
 -define(TS_DAY_SEC, 86400).
 
 -type filter_type() ::  nil | view | user | docids | mango.
@@ -295,7 +295,7 @@ update_docs_row(#rdoc{rid = OldRepId, filter = user} = Row, RepId) ->
 -spec error_backoff(non_neg_integer()) -> seconds().
 error_backoff(ErrCnt) ->
     Exp = min(ErrCnt, ?ERROR_MAX_BACKOFF_EXPONENT),
-    5 + random:uniform(1 bsl Exp).
+    random:uniform(64 bsl Exp).
 
 
 -spec filter_backoff() -> seconds().
