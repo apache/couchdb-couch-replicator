@@ -57,8 +57,9 @@ worker_fun(Id, Rep, WaitSec) ->
         erlang:demonitor(Ref, [flush]),
         exit(Pid, kill),
         {DbName, DocId} = Id,
+        TimeoutSec = round(?WORKER_TIMEOUT_MSEC / 1000),
         Msg = io_lib:format("Replication for db ~p doc ~p failed to start due "
-            "to timeout after ~B seconds", [DbName, DocId, ?WORKER_TIMEOUT_MSEC/1000]),
+            "to timeout after ~B seconds", [DbName, DocId, TimeoutSec]),
         Result = {temporary_error, couch_util:to_binary(Msg)},
         exit(#doc_worker_result{id = Id, result = Result})
     end.
