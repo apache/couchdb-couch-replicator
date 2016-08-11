@@ -209,8 +209,17 @@ handle_info({'DOWN', _Ref, process, Pid, Reason}, State) ->
     couch_log:notice("~p: Job ~p died with reason: ~p",
         [?MODULE, Job#job.id, Reason]),
     ok = update_state_crashed(Job, Reason, State),
-    start_pending_jobs(State),
-    update_running_jobs_stats(),
+    case ets:info(?MODULE, size) < State#state.max_jobs of
+        true ->
+            % Starting pending jobs is an O(TotalJobsCount) operation. Only do
+            % it if there is a relatively small number of jobs. Otherwise
+            % scheduler could be blocked if there is a cascade of lots failing
+            % jobs in a row.
+            start_pending_jobs(State),
+            update_running_jobs_stats();
+        false ->
+            ok
+    end,
     {noreply, State};
 
 handle_info(_, State) ->
