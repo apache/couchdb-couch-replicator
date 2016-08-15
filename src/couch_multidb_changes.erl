@@ -240,7 +240,7 @@ changes_reader_cb({change, Change, _}, _, {Server, DbName}) ->
     ok = gen_server:call(Server, {change, DbName, Change}, infinity),
     {Server, DbName};
 
-changes_reader_cb({stop, EndSeq, _Pending}, _, {Server, DbName}) ->
+changes_reader_cb({stop, EndSeq}, _, {Server, DbName}) ->
     ok = gen_server:call(Server, {checkpoint, DbName, EndSeq}, infinity),
     {Server, DbName};
 
@@ -535,7 +535,7 @@ t_changes_reader_cb_change() ->
 t_changes_reader_cb_stop() ->
     ?_test(begin
         {ok, Pid} = start_link(?SUFFIX, ?MOD, zig, []),
-        ChArg = {stop, 11, ignore},
+        ChArg = {stop, 11},
         {Pid, ?DBNAME} = changes_reader_cb(ChArg, chtype, {Pid, ?DBNAME}),
         % We checkpoint on stop, check if checkpointed at correct sequence
         #state{tid = Tid} = sys:get_state(Pid),
