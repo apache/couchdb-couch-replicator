@@ -206,20 +206,7 @@ handle_info({'DOWN', _Ref, process, Pid, normal}, State) ->
 
 handle_info({'DOWN', _Ref, process, Pid, Reason}, State) ->
     {ok, Job} = job_by_pid(Pid),
-    couch_log:notice("~p: Job ~p died with reason: ~p",
-        [?MODULE, Job#job.id, Reason]),
-    ok = update_state_crashed(Job, Reason, State),
-    case ets:info(?MODULE, size) < State#state.max_jobs of
-        true ->
-            % Starting pending jobs is an O(TotalJobsCount) operation. Only do
-            % it if there is a relatively small number of jobs. Otherwise
-            % scheduler could be blocked if there is a cascade of lots failing
-            % jobs in a row.
-            start_pending_jobs(State),
-            update_running_jobs_stats();
-        false ->
-            ok
-    end,
+    ok = handle_crashed_job(Job, Reason, State),
     {noreply, State};
 
 handle_info(_, State) ->
@@ -273,6 +260,40 @@ handle_config_terminate(Self, _, _) ->
 
 
 %% private functions
+
+
+% Handle crashed jobs. Handling differs between transient and permanent jobs.
+% Transient jobs are those posted to the _replicate endpoint. They don't have a
+% db associated with them. When those jobs crash, they are not restarted. That
+% is also consistent with behavior when the node they run on, crashed and they
+% do not migrate to other nodes. Permanent jobs are those created from
+% replicator documents. Those jobs, once they pass basic validation and end up
+% in the scheduler will be retried indefinitely (with appropriate exponential
+% backoffs).
+-spec handle_crashed_job(#job{}, any(), #state{}) -> ok.
+handle_crashed_job(#job{rep = #rep{db_name = null}} = Job, Reason, _State) ->
+    Msg = "~p : Transient job ~p failed, removing. Error: ~p",
+    ErrorBinary = couch_replicator_utils:rep_error_to_binary(Reason),
+    couch_log:error(Msg, [?MODULE, Job#job.id, ErrorBinary]),
+    remove_job_int(Job),
+    update_running_jobs_stats(),
+    ok;
+
+handle_crashed_job(Job, Reason, State) ->
+    ok = update_state_crashed(Job, Reason, State),
+    case ets:info(?MODULE, size) < State#state.max_jobs of
+        true ->
+            % Starting pending jobs is an O(TotalJobsCount) operation. Only do
+            % it if there is a relatively small number of jobs. Otherwise
+            % scheduler could be blocked if there is a cascade of lots failing
+            % jobs in a row.
+            start_pending_jobs(State),
+            update_running_jobs_stats(),
+            ok;
+        false ->
+            ok
+    end.
+
 
 % Attempt to start a newly added job. First quickly check if total jobs
 % already exceed max jobs, then do a more expensive check which runs a
@@ -760,7 +781,9 @@ scheduler_test_() ->
             t_rotate_continuous_only_if_mixed(),
             t_oneshot_dont_get_starting_priority(),
             t_oneshot_will_hog_the_scheduler(),
-            t_if_excess_is_trimmed_rotation_doesnt_happen()
+            t_if_excess_is_trimmed_rotation_doesnt_happen(),
+            t_if_transient_job_crashes_it_gets_removed(),
+            t_if_permanent_job_crashes_it_stays_in_ets()
          ]
     }.
 
@@ -999,12 +1022,50 @@ t_if_excess_is_trimmed_rotation_doesnt_happen() ->
     end).
 
 
+t_if_transient_job_crashes_it_gets_removed() ->
+    ?_test(begin
+        Pid = mock_pid(),
+        Job =  #job{
+            id = job1,
+            pid = Pid,
+            history = [added()],
+            rep = #rep{db_name = null, options = [{continuous, true}]}
+        },
+        setup_jobs([Job]),
+        ?assertEqual(1, ets:info(?MODULE, size)),
+        State = #state{max_history = 3},
+        {noreply, State} = handle_info({'DOWN', r1, process, Pid, failed}, State),
+        ?assertEqual(0, ets:info(?MODULE, size))
+   end).
+
+
+t_if_permanent_job_crashes_it_stays_in_ets() ->
+    ?_test(begin
+        Pid = mock_pid(),
+        Job =  #job{
+            id = job1,
+            pid = Pid,
+            history = [added()],
+            rep = #rep{db_name = <<"db1">>, options = [{continuous, true}]}
+        },
+        setup_jobs([Job]),
+        ?assertEqual(1, ets:info(?MODULE, size)),
+        State = #state{max_jobs =1, max_history = 3},
+        {noreply, State} = handle_info({'DOWN', r1, process, Pid, failed}, State),
+        ?assertEqual(1, ets:info(?MODULE, size)),
+        [Job1] = ets:lookup(?MODULE, job1),
+        [Latest | _] = Job1#job.history,
+        ?assertMatch({{crashed, failed}, _}, Latest)
+   end).
+
+
 % Test helper functions
 
 setup() ->
     catch ets:delete(?MODULE),
     meck:expect(couch_log, notice, 2, ok),
     meck:expect(couch_log, warning, 2, ok),
+    meck:expect(couch_log, error, 2, ok),
     meck:expect(couch_replicator_scheduler_sup, terminate_child, 1, ok),
     meck:expect(couch_stats, increment_counter, 1, ok),
     meck:expect(couch_stats, update_gauge, 2, ok),
