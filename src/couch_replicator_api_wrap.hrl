@@ -27,6 +27,8 @@
     http_connections
 }).
 
+-record(fabricdb, {name, user_ctx}).
+
 -record(oauth, {
     consumer_key,
     token,

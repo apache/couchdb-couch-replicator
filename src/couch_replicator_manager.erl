@@ -514,7 +514,6 @@ rep_user_ctx({RepDoc}) ->
         }
     end.
 
-
 maybe_start_replication(State, DbName, DocId, RepDoc) ->
     #rep{id = {BaseId, _} = RepId} = Rep0 = parse_rep_doc(RepDoc),
     Rep = Rep0#rep{db_name = DbName},
@@ -566,7 +565,6 @@ parse_rep_doc(RepDoc) ->
         throw({bad_rep_doc, to_binary({Tag, Err})})
     end,
     Rep.
-
 
 maybe_tag_rep_doc(DbName, DocId, {RepProps}, RepId) ->
     case get_json_value(<<"_replication_id">>, RepProps) of

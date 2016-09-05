@@ -639,12 +639,15 @@ cancel_timer(#rep_state{timer = Timer} = State) ->
 init_state(Rep) ->
     #rep{
         id = {BaseId, _Ext},
-        source = Src0, target = Tgt,
+        source = Src0, target = Tgt0,
         options = Options, user_ctx = UserCtx,
         type = Type, view = View
     } = Rep,
+    % note if fabric should be used
+    Src1 = maybe_fabric(Rep, Src0),
+    Tgt = maybe_fabric(Rep, Tgt0),
     % Adjust minimum number of http source connections to 2 to avoid deadlock
-    Src = adjust_maxconn(Src0, BaseId),
+    Src = adjust_maxconn(Src1, BaseId),
     {ok, Source} = couch_replicator_api_wrap:db_open(Src, [{user_ctx, UserCtx}]),
     {ok, Target} = couch_replicator_api_wrap:db_open(Tgt, [{user_ctx, UserCtx}],
         get_value(create_target, Options, false)),
@@ -693,6 +696,14 @@ init_state(Rep) ->
     },
     State#rep_state{timer = start_timer(State)}.
 
+%% annotate "local" dbname with fabric tuple if
+%% from a clustered database.
+maybe_fabric(#rep{}, #httpdb{} = HttpDb) ->
+    HttpDb;
+maybe_fabric(#rep{db_name = <<"shards/", _/binary>>}, DbName) ->
+    {fabric, DbName};
+maybe_fabric(#rep{}, DbName) ->
+    DbName.
 
 find_replication_logs(DbList, #rep{id = {BaseId, _}} = Rep) ->
     LogId = ?l2b(?LOCAL_DOC_PREFIX ++ BaseId),

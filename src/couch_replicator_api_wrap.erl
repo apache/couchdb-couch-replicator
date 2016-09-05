@@ -1,4 +1,4 @@
-% Licensed under the Apache License, Version 2.0 (the "License"); you may not
+% licensed under the Apache License, Version 2.0 (the "License"); you may not
 % use this file except in compliance with the License. You may obtain a copy of
 % the License at
 %
@@ -62,9 +62,11 @@ db_uri(#httpdb{url = Url}) ->
 db_uri(#db{name = Name}) ->
     db_uri(Name);
 
+db_uri(#fabricdb{name = Name}) ->
+    db_uri(Name);
+
 db_uri(DbName) ->
     ?b2l(DbName).
-
 
 db_open(Db, Options) ->
     db_open(Db, Options, false).
@@ -121,9 +123,9 @@ db_open(DbName, Options, Create) ->
         true ->
             ok = couch_httpd:verify_is_server_admin(
                 get_value(user_ctx, Options)),
-            couch_db:create(DbName, Options)
+            create(DbName, Options)
         end,
-        case couch_db:open(DbName, Options) of
+        case open(DbName, Options) of
         {error, {illegal_database_name, _}} ->
             throw({db_not_found, DbName});
         {not_found, _Reason} ->
@@ -148,6 +150,9 @@ get_db_info(#httpdb{} = Db) ->
         fun(200, _, {Props}) ->
             {ok, Props}
         end);
+get_db_info(#fabricdb{name = DbName, user_ctx = UserCtx}) ->
+    fabric:get_security(DbName, [{user_ctx, UserCtx}]),
+    fabric:get_db_info(DbName);
 get_db_info(#db{name = DbName, user_ctx = UserCtx}) ->
     {ok, Db} = couch_db:open(DbName, [{user_ctx, UserCtx}]),
     {ok, Info} = couch_db:get_db_info(Db),
@@ -171,6 +176,9 @@ get_pending_count(#httpdb{} = Db, Seq) ->
     send_req(Db, Options, fun(200, _, {Props}) ->
         {ok, couch_util:get_value(<<"pending">>, Props, null)}
     end);
+get_pending_count(#fabricdb{} = Db, Seq) ->
+    Args = #changes_args{since=Seq, limit=0, db_open_options=[{user_ctx, Db#fabricdb.user_ctx}]},
+    with_fabric(changes, [Db#fabricdb.name, fun pending_callback/2, nil, Args]);
 get_pending_count(#db{name=DbName}=Db, Seq) when is_number(Seq) ->
     {ok, CountDb} = couch_db:open(DbName, [{user_ctx, Db#db.user_ctx}]),
     Pending = couch_db:count_changes_since(CountDb, Seq),
@@ -340,6 +348,13 @@ open_doc(#httpdb{} = Db, Id, Options) ->
         (_, _, {Props}) ->
             {error, get_value(<<"error">>, Props)}
         end);
+open_doc(#fabricdb{} = Db, Id, Options) ->
+    case with_fabric(open_doc, [Db#fabricdb.name, Id, Options]) of
+    {ok, _} = Ok ->
+        Ok;
+    {not_found, _Reason} ->
+        {error, <<"not_found">>}
+    end;
 open_doc(Db, Id, Options) ->
     case couch_db:open_doc(Db, Id, Options) of
     {ok, _} = Ok ->
@@ -971,4 +986,51 @@ header_value(Key, Headers, Default) ->
             Value;
         _ ->
             Default
+    end.
+
+%% fabric bits
+
+create({fabric, DbName}, Options) ->
+    with_fabric(create_db, [DbName, Options]);
+create(DbName, Options) ->
+    couch_db:create(DbName, Options).
+
+open({fabric, DbName}, Options) ->
+    with_fabric(get_security, [DbName, Options]),
+    UserCtx = couch_util:get_value(user_ctx, Options, #user_ctx{}),
+    {ok, #fabricdb{name=DbName, user_ctx=UserCtx}};
+open(DbName, Options) ->
+    couch_db:open(DbName, Options).
+
+handle_db_changes(Args, Req, Db) ->
+    couch_changes:handle_db_changes(Args, Req, Db).
+
+pending_callback(start, Acc) ->
+    {ok, Acc};
+pending_callback({stop, _Seq, Pending}, _Acc) ->
+    {ok, Pending}.
+
+with_fabric(F, A) ->
+    {Pid, Ref} = spawn_monitor(fun() ->
+        try apply(fabric, F, A) of
+            Resp ->
+                exit({exit_ok, Resp})
+        catch
+            throw:Reason ->
+                exit({exit_throw, Reason});
+            error:Reason ->
+                exit({exit_error, Reason});
+            exit:Reason ->
+                exit({exit_exit, Reason})
+        end
+    end),
+    receive
+        {'DOWN', Ref, process, Pid, {exit_ok, Ret}} ->
+            Ret;
+        {'DOWN', Ref, process, Pid, {exit_throw, Reason}} ->
+            throw(Reason);
+        {'DOWN', Ref, process, Pid, {exit_error, Reason}} ->
+            erlang:error(Reason);
+        {'DOWN', Ref, process, Pid, {exit_exit, Reason}} ->
+            erlang:exit(Reason)
     end.
