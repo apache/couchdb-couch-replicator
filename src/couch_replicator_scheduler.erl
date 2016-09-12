@@ -418,7 +418,7 @@ start_job_int(#job{} = Job, State) ->
             Ref = monitor(process, Child),
             ok = update_state_started(Job, Child, Ref, State),
             couch_log:notice("~p: Job ~p started as ~p",
-                [?MODULE, Job#job.id, Job#job.pid]);
+                [?MODULE, Job#job.id, Child]);
         {error, {already_started, OtherPid}} ->
             couch_log:notice("~p: Job ~p already running as ~p. Most likely"
                 " because a duplicate replication is running on another node",
