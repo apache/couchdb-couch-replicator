@@ -43,6 +43,7 @@
 
 -define(DEFAULT_QUIET_PERIOD, 60). % seconds
 -define(DEFAULT_START_PERIOD, 5). % seconds
+-define(RELISTEN_DELAY, 5000).
 
 -record(state, {
     start_time :: erlang:timestamp(),
@@ -87,7 +88,7 @@ is_stable() ->
 
 init([]) ->
     net_kernel:monitor_nodes(true),
-    ok = config:listen_for_changes(?MODULE, self()),
+    ok = config:listen_for_changes(?MODULE, nil),
     Period = abs(config:get_integer("replicator", "cluster_quiet_period",
         ?DEFAULT_QUIET_PERIOD)),
     StartPeriod = abs(config:get_integer("replicator", "cluster_start_period",
@@ -141,7 +142,11 @@ handle_info(stability_check, State) ->
        false ->
            Timer = new_timer(interval(State)),
            {noreply, State#state{timer = Timer}}
-   end.
+   end;
+
+handle_info(restart_config_listener, State) ->
+    ok = config:listen_for_changes(?MODULE, nil),
+    {noreply, State}.
 
 
 code_change(_OldVsn, State, _Extra) ->
@@ -184,18 +189,17 @@ now_diff_sec(Time) ->
 
 
 handle_config_change("replicator", "cluster_quiet_period", V, _, S) ->
-    ok = gen_server:cast(S, {set_period, list_to_integer(V)}),
+    ok = gen_server:cast(?MODULE, {set_period, list_to_integer(V)}),
     {ok, S};
 handle_config_change(_, _, _, _, S) ->
     {ok, S}.
 
 
 handle_config_terminate(_, stop, _) -> ok;
-handle_config_terminate(Self, _, _) ->
-    spawn(fun() ->
-        timer:sleep(5000),
-        config:listen_for_changes(?MODULE, Self)
-    end).
+handle_config_terminate(_S, _R, _St) ->
+    Pid = whereis(?MODULE),
+    erlang:send_after(?RELISTEN_DELAY, Pid, restart_config_listener).
+
 
 -spec owner_int(binary(), binary()) -> node().
 owner_int(DbName, DocId) ->

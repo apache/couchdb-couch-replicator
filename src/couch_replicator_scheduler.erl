@@ -42,6 +42,8 @@
 -define(MAX_BACKOFF_EXPONENT, 10).
 -define(BACKOFF_INTERVAL_MICROS, 30 * 1000 * 1000).
 
+-define(RELISTEN_DELAY, 5000).
+
 -define(DEFAULT_MAX_JOBS, 500).
 -define(DEFAULT_MAX_CHURN, 20).
 -define(DEFAULT_MAX_HISTORY, 20).
@@ -120,7 +122,7 @@ find_jobs_by_doc(DbName, DocId) ->
 
 init(_) ->
     ?MODULE = ets:new(?MODULE, [named_table, {keypos, #job.id}]),
-    ok = config:listen_for_changes(?MODULE, self()),
+    ok = config:listen_for_changes(?MODULE, nil),
     Interval = config:get_integer("replicator", "interval", ?DEFAULT_SCHEDULER_INTERVAL),
     MaxJobs = config:get_integer("replicator", "max_jobs", ?DEFAULT_MAX_JOBS),
     MaxChurn = config:get_integer("replicator", "max_churn", ?DEFAULT_MAX_CHURN),
@@ -209,6 +211,10 @@ handle_info({'DOWN', _Ref, process, Pid, Reason}, State) ->
     ok = handle_crashed_job(Job, Reason, State),
     {noreply, State};
 
+handle_info(restart_config_listener, State) ->
+    ok = config:listen_for_changes(?MODULE, nil),
+    {noreply, State};
+
 handle_info(_, State) ->
     {noreply, State}.
 
@@ -229,34 +235,32 @@ format_status(_Opt, [_PDict, State]) ->
 
 %% config listener functions
 
-handle_config_change("replicator", "max_jobs", V, _, Pid) ->
-    ok = gen_server:cast(Pid, {set_max_jobs, list_to_integer(V)}),
-    {ok, Pid};
+handle_config_change("replicator", "max_jobs", V, _, S) ->
+    ok = gen_server:cast(?MODULE, {set_max_jobs, list_to_integer(V)}),
+    {ok, S};
 
-handle_config_change("replicator", "max_churn", V, _, Pid) ->
-    ok = gen_server:cast(Pid, {set_max_churn, list_to_integer(V)}),
-    {ok, Pid};
+handle_config_change("replicator", "max_churn", V, _, S) ->
+    ok = gen_server:cast(?MODULE, {set_max_churn, list_to_integer(V)}),
+    {ok, S};
 
-handle_config_change("replicator", "interval", V, _, Pid) ->
-    ok = gen_server:cast(Pid, {set_interval, list_to_integer(V)}),
-    {ok, Pid};
+handle_config_change("replicator", "interval", V, _, S) ->
+    ok = gen_server:cast(?MODULE, {set_interval, list_to_integer(V)}),
+    {ok, S};
 
-handle_config_change("replicator", "max_history", V, _, Pid) ->
-    ok = gen_server:cast(Pid, {set_history, list_to_integer(V)}),
-    {ok, Pid};
+handle_config_change("replicator", "max_history", V, _, S) ->
+    ok = gen_server:cast(?MODULE, {set_history, list_to_integer(V)}),
+    {ok, S};
 
-handle_config_change(_, _, _, _, Pid) ->
-    {ok, Pid}.
+handle_config_change(_, _, _, _, S) ->
+    {ok, S}.
 
 
 handle_config_terminate(_, stop, _) ->
     ok;
 
-handle_config_terminate(Self, _, _) ->
-    spawn(fun() ->
-        timer:sleep(5000),
-        config:listen_for_changes(?MODULE, Self)
-    end).
+handle_config_terminate(_, _, _) ->
+    Pid = whereis(?MODULE),
+    erlang:send_after(?RELISTEN_DELAY, Pid, restart_config_listener).
 
 
 %% private functions

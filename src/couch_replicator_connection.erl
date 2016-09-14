@@ -24,6 +24,7 @@
 -export([handle_config_change/5, handle_config_terminate/3]).
 
 -define(DEFAULT_CLOSE_INTERVAL, 90000).
+-define(RELISTEN_DELAY, 5000).
 
 -record(state, {
     close_interval,
@@ -47,7 +48,7 @@ start_link() ->
 init([]) ->
     process_flag(trap_exit, true),
     ?MODULE = ets:new(?MODULE, [named_table, public, {keypos, #connection.worker}]),
-    ok = config:listen_for_changes(?MODULE, self()),
+    ok = config:listen_for_changes(?MODULE, nil),
     Interval = config:get_integer("replicator", "connection_close_interval", ?DEFAULT_CLOSE_INTERVAL),
     {ok, Timer} = timer:send_after(Interval, close_idle_connections),
     ibrowse:add_config([{inactivity_timeout, Interval}]),
@@ -160,7 +161,11 @@ handle_info(close_idle_connections, State) ->
     end, Conns),
     {ok, cancel} = timer:cancel(Timer),
     {ok, NewTimer} = timer:send_after(Interval, close_idle_connections),
-    {noreply, State#state{timer=NewTimer}}.
+    {noreply, State#state{timer=NewTimer}};
+
+handle_info(restart_config_listener, State) ->
+    ok = config:listen_for_changes(?MODULE, nil),
+    {noreply, State}.
 
 
 code_change(_OldVsn, State, _Extra) ->
@@ -179,19 +184,18 @@ delete_worker(Worker) ->
     ok.
 
 
-handle_config_change("replicator", "connection_close_interval", V, _, Pid) ->
-    ok = gen_server:cast(Pid, {connection_close_interval, list_to_integer(V)}),
-    {ok, Pid};
+handle_config_change("replicator", "connection_close_interval", V, _, S) ->
+    ok = gen_server:cast(?MODULE, {connection_close_interval,
+        list_to_integer(V)}),
+    {ok, S};
 
-handle_config_change(_, _, _, _, Pid) ->
-    {ok, Pid}.
+handle_config_change(_, _, _, _, S) ->
+    {ok, S}.
 
 
 handle_config_terminate(_, stop, _) ->
     ok;
 
-handle_config_terminate(Self, _, _) ->
-    spawn(fun() ->
-        timer:sleep(5000),
-        config:listen_for_changes(?MODULE, Self)
-    end).
+handle_config_terminate(_, _, _) ->
+    Pid = whereis(?MODULE),
+    erlang:send_after(?RELISTEN_DELAY, Pid, restart_config_listener).
