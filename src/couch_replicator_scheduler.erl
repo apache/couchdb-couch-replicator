@@ -41,7 +41,7 @@
 %% definitions
 -define(MAX_BACKOFF_EXPONENT, 10).
 -define(BACKOFF_INTERVAL_MICROS, 30 * 1000 * 1000).
-
+-define(DEFAULT_HEALTH_THRESHOLD_SEC, 2 * 60).
 -define(RELISTEN_DELAY, 5000).
 
 -define(DEFAULT_MAX_JOBS, 500).
@@ -327,12 +327,16 @@ pending_jobs(0) ->
 pending_jobs(Count) when is_integer(Count), Count > 0 ->
     Set0 = gb_sets:new(),  % [{LastStart, Job},...]
     Now = os:timestamp(),
-    {Set1, _, _} = ets:foldl(fun pending_fold/2, {Set0, Now, Count}, ?MODULE),
+    HealthThreshold = config:get_integer("replicator", "health_threshold",
+        ?DEFAULT_HEALTH_THRESHOLD_SEC),
+    Acc0 = {Set0, Now, Count, HealthThreshold},
+    {Set1, _, _, _} = ets:foldl(fun pending_fold/2, Acc0, ?MODULE),
     [Job || {_Started, Job} <- gb_sets:to_list(Set1)].
 
 
-pending_fold(Job, {Set, Now, Count}) ->
-    Set1 = case {not_recently_crashed(Job, Now), gb_sets:size(Set) >= Count} of
+pending_fold(Job, {Set, Now, Count, HealthThreshold}) ->
+    Set1 = case {not_recently_crashed(Job, Now, HealthThreshold),
+        gb_sets:size(Set) >= Count} of
         {true, true} ->
              % Job is healthy but already reached accumulated limit, so might
              % have to replace one of the accumulated jobs
@@ -345,7 +349,7 @@ pending_fold(Job, {Set, Now, Count}) ->
              % This jobs is not healthy (has crashed too recently), so skip it.
              Set
     end,
-    {Set1, Now, Count}.
+    {Set1, Now, Count, HealthThreshold}.
 
 
 % Replace Job in the accumulator if it is older than youngest job there.
@@ -380,26 +384,58 @@ oldest_job_first(#job{} = A, #job{} = B) ->
     last_started(A) =< last_started(B).
 
 
-not_recently_crashed(#job{} = Job, Now) ->
-    case Job#job.history of
+not_recently_crashed(#job{history = History}, Now, HealthThreshold) ->
+    case History of
         [{added, _When}] ->
             true;
         [{stopped, _When} | _] ->
             true;
         _ ->
-            case Crashes = crashes_before_stop(Job) of
-                [] ->
-                    true;
-                [{{crashed, _Reason}, When} | _] ->
-                    timer:now_diff(Now, When) >= backoff_micros(length(Crashes))
-            end
+            LatestCrashT = latest_crash_timestamp(History),
+            CrashCount = consecutive_crashes(History, HealthThreshold),
+            timer:now_diff(Now, LatestCrashT) >= backoff_micros(CrashCount)
     end.
 
--spec crashes_before_stop(#job{}) -> list().
-crashes_before_stop(#job{history = History}) ->
-    EventsBeforeStop = lists:takewhile(
-        fun({Event, _}) -> Event =/= stopped end, History),
-    [Crash || {{crashed, _Reason}, _When} = Crash <- EventsBeforeStop].
+
+% Count consecutive crashes by comparing current and next event pairs. A crash
+% is when a job starts and then crashes in a short period of time. If a job has
+% stopped, consider it healthy. Stop counting crashes after most recent healthy
+% run is encountered ('done' is used as a marker for that).
+-spec consecutive_crashes(history(), non_neg_integer()) -> non_neg_integer().
+consecutive_crashes(History, HealthThreshold) when is_list(History) ->
+    consecutive_crashes(History, HealthThreshold, 0).
+
+
+-spec consecutive_crashes(history(), non_neg_integer(), non_neg_integer()) ->
+     non_neg_integer().
+consecutive_crashes([], _HealthThreashold, Count) ->
+    Count;
+
+consecutive_crashes([{{crashed, _}, CrashT}, {started, StartT} | Rest],
+    HealthThreshold, Count) ->
+    case timer:now_diff(CrashT, StartT) > HealthThreshold * 1000000 of
+        true ->
+            Count;
+        false ->
+            consecutive_crashes(Rest, HealthThreshold, Count + 1)
+    end;
+
+consecutive_crashes([{stopped, _}, {started, _} | _], _HealthThreshold, Count) ->
+    Count;
+
+consecutive_crashes([_ | Rest], HealthThreshold, Count) ->
+    consecutive_crashes(Rest, HealthThreshold, Count).
+
+
+-spec latest_crash_timestamp(history()) -> erlang:timestamp().
+latest_crash_timestamp([]) ->
+    {0, 0, 0};  % Used to avoid special-casing "no crash" when doing now_diff
+
+latest_crash_timestamp([{{crashed, _Reason}, When} | _]) ->
+    When;
+
+latest_crash_timestamp([_Event | Rest]) ->
+    latest_crash_timestamp(Rest).
 
 
 -spec backoff_micros(non_neg_integer()) -> non_neg_integer().
@@ -725,16 +761,35 @@ backoff_micros_test_() ->
     ]].
 
 
-crashes_before_stop_test_() ->
-    [?_assertEqual(R, crashes_before_stop(job(H))) || {R, H} <- [
-        {[], [added()]},
-        {[], [stopped()]},
-        {[crashed()], [crashed()]},
-        {[crashed()], [started(), crashed()]},
-        {[crashed()], [added(), started(), crashed()]},
-        {[crashed(3), crashed(1)], [crashed(3), started(2), crashed(1)]},
-        {[], [stopped(), crashed()]},
-        {[crashed(3)], [crashed(3), stopped(2), crashed(1)]}
+consecutive_crashes_test_() ->
+    Threshold = ?DEFAULT_HEALTH_THRESHOLD_SEC,
+    [?_assertEqual(R, consecutive_crashes(H, Threshold)) || {R, H} <- [
+        {0, []},
+        {0, [added()]},
+        {0, [stopped()]},
+        {0, [crashed()]},
+        {1, [crashed(), started(), added()]},
+        {2, [crashed(3), started(2), crashed(1), started(0)]},
+        {0, [stopped(3), started(2), crashed(1), started(0)]},
+        {1, [crashed(3), started(2), stopped(1), started(0)]},
+        {0, [crashed(999), started(0)]},
+        {1, [crashed(999), started(998), crashed(997), started(0)]}
+    ]].
+
+
+consecutive_crashes_non_default_threshold_test_() ->
+    [?_assertEqual(R, consecutive_crashes(H, T)) || {R, H, T} <- [
+        {0, [crashed(11), started(0)], 10},
+        {1, [crashed(10), started(0)], 10}
+    ]].
+
+
+latest_crash_timestamp_test_() ->
+    [?_assertEqual({0, R, 0}, latest_crash_timestamp(H)) || {R, H} <- [
+         {0, [added()]},
+         {1, [crashed(1)]},
+         {3, [crashed(3), started(2), crashed(1), started(0)]},
+         {1, [started(3), stopped(2), crashed(1), started(0)]}
     ]].
 
 
@@ -807,7 +862,8 @@ t_pending_jobs_simple() ->
 t_pending_jobs_skip_crashed() ->
    ?_test(begin
         Job = oneshot(1),
-        History = [crashed(os:timestamp()) | Job#job.history],
+        Ts = os:timestamp(),
+        History = [crashed(Ts), started(Ts) | Job#job.history],
         Job1 = Job#job{history = History},
         Job2 = oneshot(2),
         Job3 = oneshot(3),
@@ -1187,8 +1243,11 @@ started() ->
     started(0).
 
 
-started(WhenSec) ->
-    {started, {0, WhenSec, 0}}.
+started(WhenSec) when is_integer(WhenSec)->
+    {started, {0, WhenSec, 0}};
+
+started({MSec, Sec, USec}) ->
+    {started, {MSec, Sec, USec}}.
 
 
 stopped() ->
