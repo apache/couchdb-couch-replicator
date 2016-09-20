@@ -137,10 +137,7 @@ handle_info({'EXIT', Pid, Reason}, State) ->
             ok;
         [Worker] ->
             #connection{host=Host, port=Port} = Worker,
-            couch_log:info(
-                "Replication connection to: ~p:~p died with reason ~p",
-                [Host, Port, Reason]
-            ),
+            maybe_log_worker_death(Host, Port, Reason),
             case Worker#connection.mref of
                 MRef when is_reference(MRef) -> demonitor(MRef, [flush]);
                 undefined -> ok
@@ -174,6 +171,14 @@ code_change(_OldVsn, State, _Extra) ->
 
 terminate(_Reason, _State) ->
     ok.
+
+
+maybe_log_worker_death(_Host, _Port, normal) ->
+    ok;
+
+maybe_log_worker_death(Host, Port, Reason) ->
+    ErrMsg = "Replication connection to: ~p:~p died with reason ~p",
+    couch_log:info(ErrMsg, [Host, Port, Reason]).
 
 
 -spec delete_worker(#connection{}) -> ok.
