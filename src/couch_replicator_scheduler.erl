@@ -397,10 +397,15 @@ not_recently_crashed(#job{history = History}, Now, HealthThreshold) ->
     end.
 
 
-% Count consecutive crashes by comparing current and next event pairs. A crash
-% is when a job starts and then crashes in a short period of time. If a job has
-% stopped, consider it healthy. Stop counting crashes after most recent healthy
-% run is encountered ('done' is used as a marker for that).
+% Count consecutive crashes. A crash happens when there is a `crashed` event
+% within a short period of time (configurable) after any other event. It could
+% be `crashed, started` for jobs crashing quickly after starting, `crashed,
+% crashed`, `crashed, stopped` if job repeatedly failed to start
+% being stopped. Or it could be `crashed, added` if it crashed immediately after
+% being added during start.
+%
+% The end of the consecutive crashes ends when a crashed event is seen with
+% the time delta between previous greater then the threshold.
 -spec consecutive_crashes(history(), non_neg_integer()) -> non_neg_integer().
 consecutive_crashes(History, HealthThreshold) when is_list(History) ->
     consecutive_crashes(History, HealthThreshold, 0).
@@ -411,13 +416,13 @@ consecutive_crashes(History, HealthThreshold) when is_list(History) ->
 consecutive_crashes([], _HealthThreashold, Count) ->
     Count;
 
-consecutive_crashes([{{crashed, _}, CrashT}, {started, StartT} | Rest],
+consecutive_crashes([{{crashed, _}, CrashT}, {_, PrevT} = PrevEvent | Rest],
     HealthThreshold, Count) ->
-    case timer:now_diff(CrashT, StartT) > HealthThreshold * 1000000 of
+    case timer:now_diff(CrashT, PrevT) > HealthThreshold * 1000000 of
         true ->
             Count;
         false ->
-            consecutive_crashes(Rest, HealthThreshold, Count + 1)
+            consecutive_crashes([PrevEvent | Rest], HealthThreshold, Count + 1)
     end;
 
 consecutive_crashes([{stopped, _}, {started, _} | _], _HealthThreshold, Count) ->
@@ -768,6 +773,11 @@ consecutive_crashes_test_() ->
         {0, [added()]},
         {0, [stopped()]},
         {0, [crashed()]},
+        {1, [crashed(), added()]},
+        {1, [crashed(), crashed()]},
+        {1, [crashed(), stopped()]},
+        {3, [crashed(), crashed(), crashed(), added()]},
+        {2, [crashed(), crashed(), stopped()]},
         {1, [crashed(), started(), added()]},
         {2, [crashed(3), started(2), crashed(1), started(0)]},
         {0, [stopped(3), started(2), crashed(1), started(0)]},
