@@ -464,11 +464,18 @@ start_job_int(#job{} = Job, State) ->
             ok = update_state_started(Job, Child, Ref, State),
             couch_log:notice("~p: Job ~p started as ~p",
                 [?MODULE, Job#job.id, Child]);
-        {error, {already_started, OtherPid}} ->
+        {error, {already_started, OtherPid}} when node(OtherPid) =:= node ->
+            Ref = monitor(process, OtherPid),
+            ok = update_state_started(Job, OtherPid, Ref, State),
+            couch_log:notice("~p: Job ~p already running as ~p. Most likely",
+                " because replicator scheduler was restarted",
+                 [?MODULE, Job#job.id, OtherPid]);
+        {error, {already_started, OtherPid}} when node(OtherPid) =/= node ->
+            CrashMsg = "Duplicate replication running on another node",
             couch_log:notice("~p: Job ~p already running as ~p. Most likely"
                 " because a duplicate replication is running on another node",
                 [?MODULE, Job#job.id, OtherPid]),
-            ok = update_state_crashed(Job, "Duplicate replication running", State);
+            ok = update_state_crashed(Job, CrashMsg, State);
         {error, Reason} ->
             couch_log:notice("~p: Job ~p failed to start for reason ~p",
                 [?MODULE, Job, Reason]),
