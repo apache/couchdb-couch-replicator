@@ -290,6 +290,8 @@ open_doc_revs(#httpdb{} = HttpDb, Id, Revs, Options, Fun, Acc) ->
             throw(missing_doc);
         {'DOWN', Ref, process, Pid, {{nocatch, {missing_stub,_} = Stub}, _}} ->
             throw(Stub);
+        {'DOWN', Ref, process, Pid, {http_request_failed, _, _, max_backoff}} ->
+            exit(max_backoff);
         {'DOWN', Ref, process, Pid, request_uri_too_long} ->
             NewMaxLen = get_value(max_url_len, Options, ?MAX_URL_LEN) div 2,
             case NewMaxLen < ?MIN_URL_LEN of
@@ -513,6 +515,8 @@ changes_since(#httpdb{headers = Headers1, timeout = InactiveTimeout} = HttpDb,
                         end)
             end)
     catch
+        exit:{http_request_failed, _, _, max_backoff} ->
+            exit(max_backoff);
         exit:{http_request_failed, _, _, {error, {connection_closed,
                 mid_stream}}} ->
             throw(retry_no_limit);
