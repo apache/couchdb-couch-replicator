@@ -457,7 +457,8 @@ add_job_int(#job{} = Job) ->
 start_job_int(#job{pid = Pid}, _State) when Pid /= undefined ->
     ok;
 
-start_job_int(#job{} = Job, State) ->
+start_job_int(#job{} = Job0, State) ->
+    Job = maybe_optimize_job_for_rate_limiting(Job0),
     case couch_replicator_scheduler_sup:start_child(Job#job.rep) of
         {ok, Child} ->
             Ref = monitor(process, Child),
@@ -759,6 +760,37 @@ crash_reason_json(_) ->
 -spec is_continuous(#job{}) -> boolean().
 is_continuous(#job{rep = Rep}) ->
     couch_util:get_value(continuous, Rep#rep.options, false).
+
+
+% If job crashed last time because it was rate limited, try to
+% optimize some options to help the job make progress.
+-spec maybe_optimize_job_for_rate_limiting(#job{}) -> #job{}.
+maybe_optimize_job_for_rate_limiting(Job = #job{history =
+    [{{crashed, {shutdown, max_backoff}}, _} | _]}) ->
+    Opts = [
+        {checkpoint_interval, 5000},
+        {worker_processes, 2},
+        {worker_batch_size, 100},
+        {http_connections, 5}
+    ],
+    Rep = lists:foldl(fun optimize_int_option/2, Job#job.rep, Opts),
+    Job#job{rep = Rep};
+
+maybe_optimize_job_for_rate_limiting(Job) ->
+    Job.
+
+
+-spec optimize_int_option({atom(), any()}, #rep{}) -> #rep{}.
+optimize_int_option({Key, Val}, #rep{options = Options} = Rep) ->
+    case couch_util:get_value(Key, Options) of
+        CurVal when is_integer(CurVal), CurVal > Val ->
+            Msg = "~p replication ~p : setting ~p = ~p due to rate limiting",
+            couch_log:warning(Msg, [?MODULE, Rep#rep.id, Key, Val]),
+            Options1 = lists:keyreplace(Key, 1, Options, {Key, Val}),
+            Rep#rep{options = Options1};
+        _ ->
+            Rep
+    end.
 
 
 -ifdef(TEST).
