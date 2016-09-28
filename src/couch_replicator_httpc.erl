@@ -98,6 +98,7 @@ send_ibrowse_req(#httpdb{headers = BaseHeaders} = HttpDb, Params) ->
         lists:ukeymerge(1, get_value(ibrowse_options, Params, []),
             HttpDb#httpdb.ibrowse_options)
     ],
+    backoff_before_request(Worker, HttpDb, Params),
     Response = ibrowse:send_req_direct(
         Worker, Url, Headers2, Method, Body, IbrowseOptions, Timeout),
     {Worker, Response}.
@@ -138,7 +139,10 @@ process_response({ibrowse_req_id, ReqId}, Worker, HttpDb, Params, Callback) ->
 
 process_response({ok, Code, Headers, Body}, Worker, HttpDb, Params, Callback) ->
     case list_to_integer(Code) of
+    429 ->
+        backoff(HttpDb, Params);
     Ok when (Ok >= 200 andalso Ok < 300) ; (Ok >= 400 andalso Ok < 500) ->
+        backoff_success(HttpDb, Params),
         couch_stats:increment_counter([couch_replicator, responses, success]),
         EJson = case Body of
         <<>> ->
@@ -148,6 +152,7 @@ process_response({ok, Code, Headers, Body}, Worker, HttpDb, Params, Callback) ->
         end,
         Callback(Ok, Headers, EJson);
     R when R =:= 301 ; R =:= 302 ; R =:= 303 ->
+        backoff_success(HttpDb, Params),
         do_redirect(Worker, R, Headers, HttpDb, Params, Callback);
     Error ->
         couch_stats:increment_counter([couch_replicator, responses, failure]),
@@ -162,7 +167,11 @@ process_stream_response(ReqId, Worker, HttpDb, Params, Callback) ->
     receive
     {ibrowse_async_headers, ReqId, Code, Headers} ->
         case list_to_integer(Code) of
+        429 ->
+            Timeout = couch_replicator_rate_limiter:max_interval(),
+            backoff(HttpDb#httpdb{timeout = Timeout}, Params);
         Ok when (Ok >= 200 andalso Ok < 300) ; (Ok >= 400 andalso Ok < 500) ->
+            backoff_success(HttpDb, Params),
             StreamDataFun = fun() ->
                 stream_data_self(HttpDb, Params, Worker, ReqId, Callback)
             end,
@@ -172,10 +181,14 @@ process_stream_response(ReqId, Worker, HttpDb, Params, Callback) ->
                 Ret = Callback(Ok, Headers, StreamDataFun),
                 Ret
             catch
+                throw:{maybe_retry_req, connection_closed} ->
+                    maybe_retry({connection_closed, mid_stream},
+                        Worker, HttpDb, Params);
                 throw:{maybe_retry_req, Err} ->
                     maybe_retry(Err, Worker, HttpDb, Params)
             end;
         R when R =:= 301 ; R =:= 302 ; R =:= 303 ->
+            backoff_success(HttpDb, Params),
             do_redirect(Worker, R, Headers, HttpDb, Params, Callback);
         Error ->
             couch_stats:increment_counter(
@@ -263,14 +276,18 @@ maybe_retry(Error, Worker, #httpdb{retries = 0} = HttpDb, Params) ->
 
 maybe_retry(Error, _Worker, #httpdb{retries = Retries, wait = Wait} = HttpDb,
     Params) ->
-    Method = string:to_upper(atom_to_list(get_value(method, Params, get))),
-    Url = couch_util:url_strip_password(full_url(HttpDb, Params)),
-    couch_log:notice("Retrying ~s request to ~s in ~p seconds due to error ~s",
-        [Method, Url, Wait / 1000, error_cause(Error)]),
     ok = timer:sleep(Wait),
+    log_retry_error(Params, HttpDb, Wait, Error),
     Wait2 = erlang:min(Wait * 2, ?MAX_WAIT),
     NewHttpDb = HttpDb#httpdb{retries = Retries - 1, wait = Wait2},
     throw({retry, NewHttpDb, Params}).
+
+
+log_retry_error(Params, HttpDb, Wait, Error) ->
+    Method = string:to_upper(atom_to_list(get_value(method, Params, get))),
+    Url = couch_util:url_strip_password(full_url(HttpDb, Params)),
+    couch_log:notice("Retrying ~s request to ~s in ~p seconds due to error ~s",
+        [Method, Url, Wait / 1000, error_cause(Error)]).
 
 
 report_error(_Worker, HttpDb, Params, Error) ->
@@ -406,3 +423,33 @@ after_redirect(RedirectUrl, _Code, HttpDb, Params) ->
 after_redirect(RedirectUrl, HttpDb, Params) ->
     Params2 = lists:keydelete(path, 1, lists:keydelete(qs, 1, Params)),
     {HttpDb#httpdb{url = RedirectUrl}, Params2}.
+
+
+backoff_key(HttpDb, Params) ->
+    Method = get_value(method, Params, get),
+    Url = HttpDb#httpdb.url,
+    {Url, Method}.
+
+
+backoff(HttpDb, Params) ->
+    Key = backoff_key(HttpDb, Params),
+    couch_replicator_rate_limiter:failure(Key),
+    throw({retry, HttpDb, Params}).
+
+
+backoff_success(HttpDb, Params) ->
+    Key = backoff_key(HttpDb, Params),
+    couch_replicator_rate_limiter:success(Key).
+
+
+backoff_before_request(Worker, HttpDb, Params) ->
+    Key = backoff_key(HttpDb, Params),
+    Limit = couch_replicator_rate_limiter:max_interval(),
+    case couch_replicator_rate_limiter:interval(Key) of
+        Sleep when Sleep >= Limit ->
+            report_error(Worker, HttpDb, Params, max_backoff);
+        Sleep when Sleep >= 1 ->
+            timer:sleep(Sleep);
+        Sleep when Sleep == 0 ->
+            ok
+    end.

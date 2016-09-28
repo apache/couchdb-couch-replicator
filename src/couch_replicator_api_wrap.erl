@@ -290,6 +290,8 @@ open_doc_revs(#httpdb{} = HttpDb, Id, Revs, Options, Fun, Acc) ->
             throw(missing_doc);
         {'DOWN', Ref, process, Pid, {{nocatch, {missing_stub,_} = Stub}, _}} ->
             throw(Stub);
+        {'DOWN', Ref, process, Pid, {http_request_failed, _, _, max_backoff}} ->
+            exit(max_backoff);
         {'DOWN', Ref, process, Pid, request_uri_too_long} ->
             NewMaxLen = get_value(max_url_len, Options, ?MAX_URL_LEN) div 2,
             case NewMaxLen < ?MIN_URL_LEN of
@@ -483,33 +485,44 @@ changes_since(#httpdb{headers = Headers1, timeout = InactiveTimeout} = HttpDb,
         JsonDocIds = ?JSON_ENCODE({[{<<"doc_ids">>, DocIds}]}),
         {[{"filter", "_doc_ids"} | BaseQArgs], post, JsonDocIds, Headers2}
     end,
-    send_req(
-        HttpDb,
-        [{method, Method}, {path, "_changes"}, {qs, QArgs},
-            {headers, Headers}, {body, Body},
-            {ibrowse_options, [{stream_to, {self(), once}}]}],
-        fun(200, _, DataStreamFun) ->
-                parse_changes_feed(Options, UserFun, DataStreamFun);
-            (405, _, _) when is_list(DocIds) ->
-                % CouchDB versions < 1.1.0 don't have the builtin _changes feed
-                % filter "_doc_ids" neither support POST
-                send_req(HttpDb, [{method, get}, {path, "_changes"},
-                    {qs, BaseQArgs}, {headers, Headers1},
-                    {ibrowse_options, [{stream_to, {self(), once}}]}],
-                    fun(200, _, DataStreamFun2) ->
-                        UserFun2 = fun(#doc_info{id = Id} = DocInfo) ->
-                            case lists:member(Id, DocIds) of
-                            true ->
-                                UserFun(DocInfo);
-                            false ->
-                                ok
-                            end;
-                        (LastSeq) ->
-                            UserFun(LastSeq)
-                        end,
-                        parse_changes_feed(Options, UserFun2, DataStreamFun2)
-                    end)
-        end);
+    try
+        send_req(
+            HttpDb,
+            [{method, Method}, {path, "_changes"}, {qs, QArgs},
+                {headers, Headers}, {body, Body},
+                {ibrowse_options, [{stream_to, {self(), once}}]}],
+            fun(200, _, DataStreamFun) ->
+                    parse_changes_feed(Options, UserFun, DataStreamFun);
+                (405, _, _) when is_list(DocIds) ->
+                    % CouchDB versions < 1.1.0 don't have the builtin
+                    % _changes feed filter "_doc_ids" neither support POST
+                    send_req(HttpDb, [{method, get}, {path, "_changes"},
+                        {qs, BaseQArgs}, {headers, Headers1},
+                        {ibrowse_options, [{stream_to, {self(), once}}]}],
+                        fun(200, _, DataStreamFun2) ->
+                            UserFun2 = fun(#doc_info{id = Id} = DocInfo) ->
+                                case lists:member(Id, DocIds) of
+                                true ->
+                                    UserFun(DocInfo);
+                                false ->
+                                    ok
+                                end;
+                            (LastSeq) ->
+                                UserFun(LastSeq)
+                            end,
+                            parse_changes_feed(Options, UserFun2,
+                                DataStreamFun2)
+                        end)
+            end)
+    catch
+        exit:{http_request_failed, _, _, max_backoff} ->
+            exit(max_backoff);
+        exit:{http_request_failed, _, _, {error, {connection_closed,
+                mid_stream}}} ->
+            throw(retry_no_limit);
+        exit:{http_request_failed, _, _, _} = Error ->
+            throw({retry_limit, Error})
+    end;
 changes_since(Db, Style, StartSeq, UserFun, Options) ->
     DocIds = get_value(doc_ids, Options),
     Selector = get_value(selector, Options),

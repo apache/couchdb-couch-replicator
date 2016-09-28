@@ -222,6 +222,14 @@ handle_info({'DOWN', Ref, _, _, Why}, #rep_state{target_monitor = Ref} = St) ->
     couch_log:error("Target database is down. Reason: ~p", [Why]),
     {stop, target_db_down, St};
 
+handle_info({'EXIT', Pid, max_backoff}, State) ->
+    couch_log:error("Max backoff reached child process ~p", [Pid]),
+    {stop, {shutdown, max_backoff}, State};
+
+handle_info({'EXIT', Pid, {shutdown, max_backoff}}, State) ->
+    couch_log:error("Max backoff reached child process ~p", [Pid]),
+    {stop, {shutdown, max_backoff}, State};
+
 handle_info({'EXIT', Pid, normal}, #rep_state{changes_reader=Pid} = State) ->
     {noreply, State};
 
@@ -275,9 +283,12 @@ handle_info({'EXIT', Pid, Reason}, #rep_state{workers = Workers} = State) ->
 handle_info(timeout, InitArgs) ->
     try do_init(InitArgs) of {ok, State} ->
         {noreply, State}
-    catch Class:Error ->
-        Stack = erlang:get_stacktrace(),
-        {stop, shutdown, {error, Class, Error, Stack, InitArgs}}
+    catch
+        exit:{http_request_failed, _, _, max_backoff} ->
+            {stop, {shutdown, max_backoff}, {error, InitArgs}};
+        Class:Error ->
+            Stack = erlang:get_stacktrace(),
+            {stop, shutdown, {error, Class, Error, Stack, InitArgs}}
     end.
 
 handle_call(get_details, _From, #rep_state{rep_details = Rep} = State) ->
@@ -420,6 +431,12 @@ terminate(shutdown, #rep_state{rep_details = #rep{id = RepId}} = State) ->
     couch_replicator_notifier:notify({stopped, RepId, <<"stopped">>}),
     terminate_cleanup(State1);
 
+terminate({shutdown, max_backoff}, {error, InitArgs}) ->
+    #rep{id = {BaseId, Ext} = RepId} = InitArgs,
+    couch_stats:increment_counter([couch_replicator, failed_starts]),
+    couch_log:warning("Replication `~s` reached max backoff ", [BaseId ++ Ext]),
+    couch_replicator_notifier:notify({error, RepId, max_backoff});
+
 terminate(shutdown, {error, Class, Error, Stack, InitArgs}) ->
     #rep{id=RepId} = InitArgs,
     couch_stats:increment_counter([couch_replicator, failed_starts]),
@@ -436,8 +453,19 @@ terminate(shutdown, {error, Class, Error, Stack, InitArgs}) ->
     end,
     couch_replicator_notifier:notify({error, RepId, NotifyError});
 
-terminate(Reason, State) ->
+terminate({shutdown, max_backoff}, State) ->
     #rep_state{
+        source_name = Source,
+        target_name = Target,
+        rep_details = #rep{id = {BaseId, Ext} = RepId}
+    } = State,
+    couch_log:error("Replication `~s` (`~s` -> `~s`) reached max backoff",
+        [BaseId ++ Ext, Source, Target]),
+    terminate_cleanup(State),
+    couch_replicator_notifier:notify({error, RepId, max_backoff});
+
+terminate(Reason, State) ->
+#rep_state{
         source_name = Source,
         target_name = Target,
         rep_details = #rep{id = {BaseId, Ext} = RepId}
