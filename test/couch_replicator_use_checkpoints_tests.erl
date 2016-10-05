@@ -17,7 +17,7 @@
 
 -import(couch_replicator_test_helper, [
     db_url/1,
-    replicate_doc/1
+    replicate/1
 ]).
 
 -define(DOCS_COUNT, 100).
@@ -173,7 +173,7 @@ compare_dbs(Source, Target) ->
     ok = couch_db:close(TargetDb).
 
 replicate(Source, Target, UseCheckpoints) ->
-    replicate_doc({[
+    replicate({[
         {<<"source">>, Source},
         {<<"target">>, Target},
         {<<"use_checkpoints">>, UseCheckpoints}
