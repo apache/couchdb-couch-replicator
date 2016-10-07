@@ -394,6 +394,8 @@ update_doc(#httpdb{} = HttpDb, #doc{id = DocId} = Doc, Options, Type) ->
                     throw({forbidden, get_value(<<"reason">>, Props)});
                 {412, <<"missing_stub">>} ->
                     throw({missing_stub, get_value(<<"reason">>, Props)});
+                {413, _} ->
+                    {error, request_body_too_large};
                 {_, Error} ->
                     {error, Error}
                 end
@@ -450,6 +452,8 @@ update_docs(#httpdb{} = HttpDb, DocList, Options, UpdateType) ->
             {body, {BodyFun, [prefix | Docs]}}, {headers, Headers}],
         fun(201, _, Results) when is_list(Results) ->
                 {ok, bulk_results_to_errors(DocList, Results, remote)};
+           (413, _, _) ->
+                {error, request_body_too_large};
            (417, _, Results) when is_list(Results) ->
                 {ok, bulk_results_to_errors(DocList, Results, remote)}
         end);
