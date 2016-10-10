@@ -73,6 +73,8 @@ rep_error_to_binary(Error) ->
     couch_util:to_binary(error_reason(Error)).
 
 
+error_reason({shutdown, Error}) ->
+    error_reason(Error);
 error_reason({error, {Error, Reason}})
   when is_atom(Error), is_binary(Reason) ->
     io_lib:format("~s: ~s", [Error, Reason]);

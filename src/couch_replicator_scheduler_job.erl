@@ -287,8 +287,12 @@ handle_info(timeout, InitArgs) ->
         exit:{http_request_failed, _, _, max_backoff} ->
             {stop, {shutdown, max_backoff}, {error, InitArgs}};
         Class:Error ->
-            Stack = erlang:get_stacktrace(),
-            {stop, shutdown, {error, Class, Error, Stack, InitArgs}}
+            ShutdownReason = {error, replication_start_error(Error)},
+            % Shutdown state is a hack as it is not really the state of the
+            % gen_server (it failed to initialize, so it doesn't have one).
+            % Shutdown state is used to pass extra info about why start failed.
+            ShutdownState = {error, Class, erlang:get_stacktrace(), InitArgs},
+            {stop, {shutdown, ShutdownReason}, ShutdownState}
     end.
 
 handle_call(get_details, _From, #rep_state{rep_details = Rep} = State) ->
@@ -437,21 +441,13 @@ terminate({shutdown, max_backoff}, {error, InitArgs}) ->
     couch_log:warning("Replication `~s` reached max backoff ", [BaseId ++ Ext]),
     couch_replicator_notifier:notify({error, RepId, max_backoff});
 
-terminate(shutdown, {error, Class, Error, Stack, InitArgs}) ->
+terminate({shutdown, {error, Error}}, {error, Class, Stack, InitArgs}) ->
     #rep{id=RepId} = InitArgs,
     couch_stats:increment_counter([couch_replicator, failed_starts]),
     CleanInitArgs = rep_strip_creds(InitArgs),
     couch_log:error("~p:~p: Replication failed to start for args ~p: ~p",
              [Class, Error, CleanInitArgs, Stack]),
-    case Error of
-    {unauthorized, DbUri} ->
-        NotifyError = {unauthorized, <<"unauthorized to access or create database ", DbUri/binary>>};
-    {db_not_found, DbUri} ->
-        NotifyError = {db_not_found, <<"could not open ", DbUri/binary>>};
-    _ ->
-        NotifyError = Error
-    end,
-    couch_replicator_notifier:notify({error, RepId, NotifyError});
+    couch_replicator_notifier:notify({error, RepId, Error});
 
 terminate({shutdown, max_backoff}, State) ->
     #rep_state{
@@ -936,3 +932,13 @@ rep_stats(State) ->
         {doc_write_failures, couch_replicator_stats:doc_write_failures(Stats)},
         {checkpointed_source_seq, CommittedSeq}
     ].
+
+
+replication_start_error({unauthorized, DbUri}) ->
+    {unauthorized, <<"unauthorized to access or create database ", DbUri/binary>>};
+
+replication_start_error({db_not_found, DbUri}) ->
+    {db_not_found, <<"could not open ", DbUri/binary>>};
+
+replication_start_error(Error) ->
+    Error.
