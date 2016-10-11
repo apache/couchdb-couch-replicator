@@ -753,8 +753,8 @@ crash_reason_json({_CrashType, Info}) when is_binary(Info) ->
     Info;
 crash_reason_json(Reason) when is_binary(Reason) ->
     Reason;
-crash_reason_json(_) ->
-    <<"unknown">>.
+crash_reason_json(Error) ->
+    couch_replicator_utils:rep_error_to_binary(Error).
 
 
 -spec is_continuous(#job{}) -> boolean().
