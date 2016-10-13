@@ -13,11 +13,22 @@
 -module(couch_replicator).
 
 -export([replicate/2, ensure_rep_db_exists/0]).
--export([stream_active_docs_info/2, stream_terminal_docs_info/3]).
+-export([stream_active_docs_info/3, stream_terminal_docs_info/4]).
+-export([replication_states/0]).
 
 -include_lib("couch/include/couch_db.hrl").
 -include("couch_replicator.hrl").
 -include_lib("couch_mrview/include/couch_mrview.hrl").
+
+-define(REPLICATION_STATES, [
+    initializing,  % Just added to scheduler
+    error,         % Could not be turned into a replication job
+    running,       % Scheduled and running
+    pending,       % Scheduled and waiting to run
+    crashing,      % Scheduled but crashing, possibly backed off by the scheduler
+    completed,     % Non-continuous (normal) completed replication
+    failed         % Terminal failure, will not be retried anymore
+]).
 
 -import(couch_util, [
     get_value/2,
@@ -137,27 +148,46 @@ cancel_replication(RepId, #user_ctx{name = Name, roles = Roles}) ->
      end.
 
 
--spec stream_terminal_docs_info(binary(), user_doc_cb(), any()) -> any().
-stream_terminal_docs_info(Db, Cb, UserAcc) ->
+-spec replication_states() -> [atom()].
+replication_states() ->
+    ?REPLICATION_STATES.
+
+
+-spec stream_terminal_docs_info(binary(), user_doc_cb(), any(), [atom()]) -> any().
+stream_terminal_docs_info(Db, Cb, UserAcc, States) ->
     DDoc = <<"_replicator">>,
     View = <<"terminal_states">>,
     QueryCb = fun handle_replicator_doc_query/2,
     Args = #mrargs{view_type = map, reduce = false},
-    Acc = {Db, Cb, UserAcc},
+    Acc = {Db, Cb, UserAcc, States},
     try fabric:query_view(Db, DDoc, View, QueryCb, Acc, Args) of
-    {ok, {Db, Cb, UserAcc1}} ->
+    {ok, {Db, Cb, UserAcc1, States}} ->
         UserAcc1
     catch error:database_does_not_exist ->
         UserAcc
     end.
 
 
-% Streaming doesn't save memory much here but it is used to provided a similar
-% API as the terminal docs, which is streaming data from the view
--spec stream_active_docs_info(user_doc_cb(), any()) -> any().
-stream_active_docs_info(Cb, UserAcc) ->
-    {Replies, _BadNodes} = rpc:multicall(couch_replicator_doc_processor, docs, []),
-    lists:foldl(Cb, UserAcc, lists:append(Replies)).
+-spec stream_active_docs_info(user_doc_cb(), any(), [atom()]) -> any().
+stream_active_docs_info(Cb, UserAcc, States) ->
+    Nodes = lists:usort([node() | nodes()]),
+    stream_active_docs_info(Nodes, Cb, UserAcc, States).
+
+
+-spec stream_active_docs_info([node()], user_doc_cb(), any(), [atom()]) -> any().
+stream_active_docs_info([], _Cb, UserAcc, _States) ->
+    UserAcc;
+
+stream_active_docs_info([Node | Nodes], Cb, UserAcc, States) ->
+    case rpc:call(Node, couch_replicator_doc_processor, docs, [States]) of
+        {badrpc, Reason} ->
+            ErrMsg = "Could not get replicator docs from ~p. Error: ~p",
+            couch_log:error(ErrMsg, [Node, Reason]),
+            stream_active_docs_info(Nodes, Cb, UserAcc, States);
+        Results ->
+            UserAcc1 = lists:foldl(Cb, UserAcc, Results),
+            stream_active_docs_info(Nodes, Cb, UserAcc1, States)
+    end.
 
 
 -spec handle_replicator_doc_query
@@ -165,21 +195,38 @@ stream_active_docs_info(Cb, UserAcc) ->
     ({error, any()}, query_acc()) -> {error, any()};
     ({meta, any()}, query_acc()) -> {ok,  query_acc()};
     (complete, query_acc()) -> {ok, query_acc()}.
-handle_replicator_doc_query({row, Props}, {Db, Cb, UserAcc}) ->
+handle_replicator_doc_query({row, Props}, {Db, Cb, UserAcc, States}) ->
     DocId = couch_util:get_value(id, Props),
-    State = couch_util:get_value(key, Props),
+    DocStateBin = couch_util:get_value(key, Props),
+    DocState = erlang:binary_to_existing_atom(DocStateBin, utf8),
     StateInfo = couch_util:get_value(value, Props),
-    EjsonInfo = {[
-        {doc_id, DocId},
-        {database, Db},
-        {id, null},
-        {state, State},
-        {info, StateInfo}
-    ]},
-    {ok, {Db, Cb, Cb(EjsonInfo, UserAcc)}};
+    % Set the error_count to 1 if failed. This is mainly for consistency as
+    % jobs from doc_processor and scheduler will have that value set
+    ErrorCount = case DocState of failed -> 1; _ -> 0 end,
+    case filter_replicator_doc_query(DocState, States) of
+        true ->
+            EjsonInfo = {[
+                {doc_id, DocId},
+                {database, Db},
+                {id, null},
+                {state, DocState},
+                {error_count, ErrorCount},
+                {info, StateInfo}
+            ]},
+            {ok, {Db, Cb, Cb(EjsonInfo, UserAcc), States}};
+        false ->
+            {ok, {Db, Cb, UserAcc, States}}
+    end;
 handle_replicator_doc_query({error, Reason}, _Acc) ->
     {error, Reason};
 handle_replicator_doc_query({meta, _Meta}, Acc) ->
     {ok, Acc};
 handle_replicator_doc_query(complete, Acc) ->
     {stop, Acc}.
+
+
+-spec filter_replicator_doc_query(atom(), [atom()]) -> boolean().
+filter_replicator_doc_query(_DocState, []) ->
+    true;
+filter_replicator_doc_query(State, States) when is_list(States) ->
+    lists:member(State, States).
