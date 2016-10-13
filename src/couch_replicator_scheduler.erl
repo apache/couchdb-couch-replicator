@@ -23,6 +23,7 @@
 %% public api
 -export([start_link/0, add_job/1, remove_job/1, reschedule/0]).
 -export([rep_state/1, find_jobs_by_dbname/1, find_jobs_by_doc/2]).
+-export([job_summary/2, health_threshold/0]).
 -export([jobs/0]).
 
 %% gen_server callbacks
@@ -102,6 +103,40 @@ rep_state(RepId) ->
             Rep
     end.
 
+
+-spec job_summary(job_id(), non_neg_integer()) -> [_] | nil.
+job_summary(JobId, HealthThreshold) ->
+    case job_by_id(JobId) of
+        {ok, #job{pid = Pid, history = History, rep = Rep}} ->
+            ErrorCount = consecutive_crashes(History, HealthThreshold),
+            {State, Info} = case {Pid, ErrorCount} of
+                {undefined, 0}  ->
+                    {pending, null};
+                {undefined, ErrorCount} when ErrorCount > 0 ->
+                     [{{crashed, Error}, _When} | _] = History,
+                     ErrMsg = couch_replicator_utils:rep_error_to_binary(Error),
+                     {crashing, ErrMsg};
+                {Pid, ErrorCount} when is_pid(Pid) ->
+                     {running, null}
+            end,
+            [
+                {source, iolist_to_binary(ejson_url(Rep#rep.source))},
+                {target, iolist_to_binary(ejson_url(Rep#rep.target))},
+                {state, State},
+                {info, Info},
+                {error_count, ErrorCount}
+            ];
+        {error, not_found} ->
+            nil  % Job might have just completed
+    end.
+
+
+-spec health_threshold() -> non_neg_integer().
+health_threshold() ->
+    config:get_integer("replicator", "health_threshold",
+        ?DEFAULT_HEALTH_THRESHOLD_SEC).
+
+
 -spec find_jobs_by_dbname(binary()) -> list(#rep{}).
 find_jobs_by_dbname(DbName) ->
     Rep = #rep{db_name = DbName, _ = '_'},
@@ -121,7 +156,8 @@ find_jobs_by_doc(DbName, DocId) ->
 %% gen_server functions
 
 init(_) ->
-    ?MODULE = ets:new(?MODULE, [named_table, {keypos, #job.id}]),
+    EtsOpts = [named_table, {read_concurrency, true}, {keypos, #job.id}],
+    ?MODULE = ets:new(?MODULE, EtsOpts),
     ok = config:listen_for_changes(?MODULE, nil),
     Interval = config:get_integer("replicator", "interval", ?DEFAULT_SCHEDULER_INTERVAL),
     MaxJobs = config:get_integer("replicator", "max_jobs", ?DEFAULT_MAX_JOBS),
@@ -327,9 +363,7 @@ pending_jobs(0) ->
 pending_jobs(Count) when is_integer(Count), Count > 0 ->
     Set0 = gb_sets:new(),  % [{LastStart, Job},...]
     Now = os:timestamp(),
-    HealthThreshold = config:get_integer("replicator", "health_threshold",
-        ?DEFAULT_HEALTH_THRESHOLD_SEC),
-    Acc0 = {Set0, Now, Count, HealthThreshold},
+    Acc0 = {Set0, Now, Count, health_threshold()},
     {Set1, _, _, _} = ets:foldl(fun pending_fold/2, Acc0, ?MODULE),
     [Job || {_Started, Job} <- gb_sets:to_list(Set1)].
 
