@@ -375,7 +375,10 @@ parse_rep_db(<<"http://", _/binary>> = Url, ProxyParams, Options) ->
 parse_rep_db(<<"https://", _/binary>> = Url, ProxyParams, Options) ->
     parse_rep_db({[{<<"url">>, Url}]}, ProxyParams, Options);
 parse_rep_db(<<DbName/binary>>, _ProxyParams, _Options) ->
-    DbName.
+    DbName;
+parse_rep_db(undefined, _ProxyParams, _Options) ->
+    throw({error, <<"Missing replicator database">>}).
+
 
 -spec maybe_add_trailing_slash(binary() | list()) -> list().
 maybe_add_trailing_slash(Url) when is_binary(Url) ->
