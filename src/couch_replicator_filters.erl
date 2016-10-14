@@ -13,6 +13,7 @@
 -module(couch_replicator_filters).
 
 -export([parse/1, fetch/4, view_type/2]).
+-export([ejsort/1]).
 
 -include_lib("couch/include/couch_db.hrl").
 

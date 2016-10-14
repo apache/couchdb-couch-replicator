@@ -108,19 +108,20 @@ ensure_rep_ddoc_exists(RepDb) ->
 ensure_rep_ddoc_exists(RepDb, DDocId) ->
     case open_rep_doc(RepDb, DDocId) of
         {not_found, _Reason} ->
-            {ok, DDoc} = replication_design_doc(DDocId),
+            DocProps = replication_design_doc_props(DDocId),
+            DDoc = couch_doc:from_json_obj({DocProps}),
             couch_log:notice("creating replicator ddoc", []),
             {ok, _Rev} = save_rep_doc(RepDb, DDoc);
         {ok, Doc} ->
-            {Props} = couch_doc:to_json_obj(Doc, []),
-            case couch_util:get_value(<<"validate_doc_update">>, Props, []) of
-                ?REP_DB_DOC_VALIDATE_FUN ->
+            Latest = replication_design_doc_props(DDocId),
+            {Props0} = couch_doc:to_json_obj(Doc, []),
+            {value, {_, Rev}, Props} = lists:keytake(<<"_rev">>, 1, Props0),
+            case compare_ejson({Props}, {Latest}) of
+                true ->
                     ok;
-                _ ->
-                    Props1 = lists:keyreplace(<<"validate_doc_update">>, 1, Props,
-                         {<<"validate_doc_update">>,
-                        ?REP_DB_DOC_VALIDATE_FUN}),
-                    DDoc = couch_doc:from_json_obj({Props1}),
+                false ->
+                    LatestWithRev = [{<<"_rev">>, Rev} | Latest],
+                    DDoc = couch_doc:from_json_obj({LatestWithRev}),
                     couch_log:notice("updating replicator ddoc", []),
                     try
                         {ok, _} = save_rep_doc(RepDb, DDoc)
@@ -133,8 +134,15 @@ ensure_rep_ddoc_exists(RepDb, DDocId) ->
     end,
     ok.
 
+-spec compare_ejson({[_]}, {[_]}) -> boolean().
+compare_ejson(EJson1, EJson2) ->
+    EjsonSorted1 = couch_replicator_filters:ejsort(EJson1),
+    EjsonSorted2 = couch_replicator_filters:ejsort(EJson2),
+    EjsonSorted1 == EjsonSorted2.
 
-replication_design_doc(DDocId) ->
+
+-spec replication_design_doc_props(binary()) -> [_].
+replication_design_doc_props(DDocId) ->
     TerminalViewEJson = {[
                 {<<"map">>, ?REP_DB_TERMINAL_STATE_VIEW_MAP_FUN},
                 {<<"reduce">>, <<"_count">>}
@@ -146,8 +154,7 @@ replication_design_doc(DDocId) ->
         {<<"views">>, {[
             {<<"terminal_states">>, TerminalViewEJson}
         ]}}
-   ],
-   {ok, couch_doc:from_json_obj({DocProps})}.
+   ].
 
 
 % Note: parse_rep_doc can handle filtered replications. During parsing of the
