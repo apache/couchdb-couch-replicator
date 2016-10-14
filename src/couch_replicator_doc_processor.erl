@@ -14,7 +14,7 @@
 -behaviour(couch_multidb_changes).
 
 -export([start_link/0]).
--export([docs/0]).
+-export([docs/1]).
 
 % multidb changes callback
 -export([db_created/2, db_deleted/2, db_found/2, db_change/3]).
@@ -35,7 +35,7 @@
 -define(TS_DAY_SEC, 86400).
 
 -type filter_type() ::  nil | view | user | docids | mango.
--type repstate() :: unscheduled | error | scheduled.
+-type repstate() :: initializing | error | scheduled.
 
 
 -record(rdoc, {
@@ -152,7 +152,7 @@ start_link() ->
 
 
 init([]) ->
-    ?MODULE = ets:new(?MODULE, [named_table, {keypos, #rdoc.id}]),
+    ?MODULE = ets:new(?MODULE, [ordered_set, named_table, {keypos, #rdoc.id}]),
     {ok, nil}.
 
 
@@ -204,7 +204,7 @@ code_change(_OldVsn, State, _Extra) ->
 updated_doc(Id, Rep, Filter) ->
     Row = #rdoc{
         id = Id,
-        state = unscheduled,
+        state = initializing,
         rep = Rep,
         rid = nil,
         filter = Filter,
@@ -347,22 +347,38 @@ get_worker_wait(#rdoc{state = scheduled, filter = user}) ->
 get_worker_wait(#rdoc{state = error, errcnt = ErrCnt}) ->
     error_backoff(ErrCnt);
 
-get_worker_wait(#rdoc{state = unscheduled}) ->
+get_worker_wait(#rdoc{state = initializing}) ->
     0.
 
 
 % _scheduler/docs HTTP endpoint helpers
 
--spec docs() -> [{[_]}] | [].
-docs() ->
-    ets:foldl(fun(RDoc, Acc) -> [ejson_doc(RDoc) | Acc]  end, [], ?MODULE).
+-spec docs([atom()]) -> [{[_]}] | [].
+docs(States) ->
+    HealthThreshold = couch_replicator_scheduler:health_threshold(),
+    ets:foldl(fun(RDoc, Acc) ->
+        case ejson_doc(RDoc, HealthThreshold) of
+            nil ->
+                Acc;  % Could have been deleted if job just completed
+            {Props} = EJson ->
+                {state, DocState} = lists:keyfind(state, 1, Props),
+                case ejson_doc_state_filter(DocState, States) of
+                    true ->
+                        [EJson | Acc];
+                    false ->
+                        Acc
+                end
+        end
+    end, [], ?MODULE).
 
 
 -spec ejson_state_info(binary() | nil) -> binary() | null.
 ejson_state_info(nil) ->
     null;
 ejson_state_info(Info) when is_binary(Info) ->
-    Info.
+    Info;
+ejson_state_info(Info) ->
+    couch_replicator_utils:rep_error_to_binary(Info).
 
 
 -spec ejson_rep_id(rep_id() | nil) -> binary() | null.
@@ -372,11 +388,25 @@ ejson_rep_id({BaseId, Ext}) ->
     iolist_to_binary([BaseId, Ext]).
 
 
--spec ejson_doc(#rdoc{}) -> {[_]}.
-ejson_doc(RDoc) ->
+-spec ejson_doc(#rdoc{}, non_neg_integer()) -> {[_]} | nil.
+ejson_doc(#rdoc{state = scheduled} = RDoc, HealthThreshold) ->
+    #rdoc{id = {DbName, DocId}, rid = RepId} = RDoc,
+    JobProps = couch_replicator_scheduler:job_summary(RepId, HealthThreshold),
+    case JobProps of
+        nil ->
+            nil;
+        [{_, _} | _] ->
+            {[
+                {doc_id, DocId},
+                {database, mem3:dbname(DbName)},
+                {id, ejson_rep_id(RepId)},
+                {node, node()} | JobProps
+            ]}
+    end;
+
+ejson_doc(#rdoc{state = RepState} = RDoc, _HealthThreshold) ->
     #rdoc{
        id = {DbName, DocId},
-       state = RepState,
        info = StateInfo,
        rid = RepId,
        errcnt = ErrorCount
@@ -391,6 +421,14 @@ ejson_doc(RDoc) ->
         {node, node()}
     ]}.
 
+
+
+-spec ejson_doc_state_filter(atom(), [atom()]) -> boolean().
+ejson_doc_state_filter(_DocState, []) ->
+    true;
+
+ejson_doc_state_filter(State, States) when is_list(States), is_atom(State) ->
+    lists:member(State, States).
 
 
 -ifdef(TEST).
@@ -534,7 +572,7 @@ t_ejson_docs() ->
     ?_test(begin
         ?assertEqual(ok, process_change(?DB, change())),
         ?assert(ets:member(?MODULE, {?DB, ?DOC1})),
-        EJsonDocs = docs(),
+        EJsonDocs = docs([]),
         ?assertMatch([{[_|_]}], EJsonDocs),
         [{DocProps}] = EJsonDocs,
         ExpectedProps = [
@@ -544,7 +582,7 @@ t_ejson_docs() ->
             {id, null},
             {info, null},
             {node, node()},
-            {state, unscheduled}
+            {state, initializing}
         ],
         ?assertEqual(ExpectedProps, lists:usort(DocProps))
     end).
