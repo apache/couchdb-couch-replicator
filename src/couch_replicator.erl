@@ -170,7 +170,7 @@ stream_terminal_docs_info(Db, Cb, UserAcc, States) ->
 
 -spec stream_active_docs_info(user_doc_cb(), any(), [atom()]) -> any().
 stream_active_docs_info(Cb, UserAcc, States) ->
-    Nodes = lists:usort([node() | nodes()]),
+    Nodes = lists:sort([node() | nodes()]),
     stream_active_docs_info(Nodes, Cb, UserAcc, States).
 
 
