@@ -61,12 +61,6 @@
             return;
         }
 
-        if (oldDoc && !newDoc._deleted && !isReplicator &&
-            (oldDoc._replication_state === 'triggered')) {
-            reportError('Only the replicator can edit replication documents ' +
-                'that are in the triggered state.');
-        }
-
         if (!newDoc._deleted) {
             validateEndpoint(newDoc.source, 'source');
             validateEndpoint(newDoc.target, 'target');
