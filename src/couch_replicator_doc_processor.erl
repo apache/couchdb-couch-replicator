@@ -199,9 +199,12 @@ code_change(_OldVsn, State, _Extra) ->
 % Handle doc update -- add to ets, then start a worker to try to turn it into
 % a replication job. In most cases it will succeed quickly but for filtered
 % replicationss or if there are duplicates, it could take longer
-% (theoretically indefinitely) until a replication could be started.
+% (theoretically indefinitely) until a replication could be started. Before
+% adding replication job, make sure to delete all old jobs associated with
+% same document.
 -spec updated_doc(db_doc_id(), #rep{}, filter_type()) -> ok.
 updated_doc(Id, Rep, Filter) ->
+    removed_doc(Id),
     Row = #rdoc{
         id = Id,
         state = initializing,
@@ -450,6 +453,7 @@ doc_processor_test_() ->
         [
             t_bad_change(),
             t_regular_change(),
+            t_change_with_existing_job(),
             t_deleted_change(),
             t_triggered_change(),
             t_completed_change(),
@@ -474,6 +478,18 @@ t_bad_change() ->
 % Regular change, parse to a #rep{} and then add job.
 t_regular_change() ->
     ?_test(begin
+        mock_existing_jobs_lookup([]),
+        ?assertEqual(ok, process_change(?DB, change())),
+        ?assert(ets:member(?MODULE, {?DB, ?DOC1})),
+        ?assert(started_worker({?DB, ?DOC1}))
+    end).
+
+
+% Regular change, parse to a #rep{} and then add job but there is already
+% a running job with same Id found.
+t_change_with_existing_job() ->
+    ?_test(begin
+        mock_existing_jobs_lookup([#rep{id = ?R2}]),
         ?assertEqual(ok, process_change(?DB, change())),
         ?assert(ets:member(?MODULE, {?DB, ?DOC1})),
         ?assert(started_worker({?DB, ?DOC1}))
@@ -483,8 +499,7 @@ t_regular_change() ->
 % Change is a deletion, and job is running, so remove job.
 t_deleted_change() ->
     ?_test(begin
-        meck:expect(couch_replicator_scheduler, find_jobs_by_doc,
-            fun(?DB, ?DOC1) -> [#rep{id = ?R2}] end),
+        mock_existing_jobs_lookup([#rep{id = ?R2}]),
         ?assertEqual(ok, process_change(?DB, deleted_change())),
         ?assert(removed_job(?R2))
     end).
@@ -493,6 +508,7 @@ t_deleted_change() ->
 % Change is in `triggered` state. Remove legacy state and add job.
 t_triggered_change() ->
     ?_test(begin
+        mock_existing_jobs_lookup([]),
         ?assertEqual(ok, process_change(?DB, change(<<"triggered">>))),
         ?assert(removed_state_fields()),
         ?assert(ets:member(?MODULE, {?DB, ?DOC1})),
@@ -516,6 +532,7 @@ t_completed_change() ->
 % completed).
 t_active_replication_completed() ->
     ?_test(begin
+        mock_existing_jobs_lookup([]),
         ?assertEqual(ok, process_change(?DB, change())),
         ?assert(ets:member(?MODULE, {?DB, ?DOC1})),
         ?assertEqual(ok, process_change(?DB, change(<<"completed">>))),
@@ -529,6 +546,7 @@ t_active_replication_completed() ->
 % written to the document anymore.
 t_error_change() ->
     ?_test(begin
+        mock_existing_jobs_lookup([]),
         ?assertEqual(ok, process_change(?DB, change(<<"error">>))),
         ?assert(removed_state_fields()),
         ?assert(ets:member(?MODULE, {?DB, ?DOC1})),
@@ -570,6 +588,7 @@ t_change_when_cluster_unstable() ->
 % Check if docs/0 function produces expected ejson after adding a job
 t_ejson_docs() ->
     ?_test(begin
+        mock_existing_jobs_lookup([]),
         ?assertEqual(ok, process_change(?DB, change())),
         ?assert(ets:member(?MODULE, {?DB, ?DOC1})),
         EJsonDocs = docs([]),
@@ -635,6 +654,11 @@ did_not_spawn_worker() ->
 
 updated_doc_with_failed_state() ->
     1 == meck:num_calls(couch_replicator_docs, update_failed, '_').
+
+
+mock_existing_jobs_lookup(ExistingJobs) ->
+    meck:expect(couch_replicator_scheduler, find_jobs_by_doc,
+            fun(?DB, ?DOC1) -> ExistingJobs end).
 
 
 change() ->
