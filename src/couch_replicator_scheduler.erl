@@ -177,6 +177,7 @@ init(_) ->
 handle_call({add_job, Job}, _From, State) ->
     case add_job_int(Job) of
         true ->
+            ok = maybe_remove_job_int(Job#job.id, State),
             ok = maybe_start_newly_added_job(Job, State),
             couch_stats:increment_counter([couch_replicator, jobs, adds]),
             TotalJobs = ets:info(?MODULE, size),
@@ -188,18 +189,8 @@ handle_call({add_job, Job}, _From, State) ->
     end;
 
 handle_call({remove_job, Id}, _From, State) ->
-    case job_by_id(Id) of
-        {ok, Job} ->
-            ok = stop_job_int(Job, State),
-            true = remove_job_int(Job),
-            couch_stats:increment_counter([couch_replicator, jobs, removes]),
-            TotalJobs = ets:info(?MODULE, size),
-            couch_stats:update_gauge([couch_replicator, jobs, total], TotalJobs),
-            update_running_jobs_stats(),
-            {reply, ok, State};
-        {error, not_found} ->
-            {reply, ok, State}
-    end;
+    ok = maybe_remove_job_int(Id, State),
+    {reply, ok, State};
 
 handle_call(reschedule, _From, State) ->
     ok = reschedule(State),
@@ -486,6 +477,22 @@ backoff_micros(CrashCount) ->
 -spec add_job_int(#job{}) -> boolean().
 add_job_int(#job{} = Job) ->
     ets:insert_new(?MODULE, Job).
+
+
+-spec maybe_remove_job_int(job_id(), #state{}) -> ok.
+maybe_remove_job_int(JobId, State) ->
+    case job_by_id(JobId) of
+        {ok, Job} ->
+            ok = stop_job_int(Job, State),
+            true = remove_job_int(Job),
+            couch_stats:increment_counter([couch_replicator, jobs, removes]),
+            TotalJobs = ets:info(?MODULE, size),
+            couch_stats:update_gauge([couch_replicator, jobs, total], TotalJobs),
+            update_running_jobs_stats(),
+            ok;
+        {error, not_found} ->
+            ok
+    end.
 
 
 start_job_int(#job{pid = Pid}, _State) when Pid /= undefined ->
