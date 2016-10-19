@@ -401,7 +401,7 @@ ejson_doc(#rdoc{state = scheduled} = RDoc, HealthThreshold) ->
         [{_, _} | _] ->
             {[
                 {doc_id, DocId},
-                {database, mem3:dbname(DbName)},
+                {database, DbName},
                 {id, ejson_rep_id(RepId)},
                 {node, node()} | JobProps
             ]}
