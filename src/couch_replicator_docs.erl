@@ -16,6 +16,7 @@
 -export([parse_rep_doc_without_id/1, parse_rep_doc_without_id/2]).
 -export([before_doc_update/2, after_doc_read/2]).
 -export([ensure_rep_db_exists/0, ensure_rep_ddoc_exists/1]).
+-export([ensure_cluster_rep_ddoc_exists/1]).
 -export([
     remove_state_fields/2,
     update_doc_completed/3,
@@ -28,6 +29,7 @@
 
 -include_lib("couch/include/couch_db.hrl").
 -include_lib("ibrowse/include/ibrowse.hrl").
+-include_lib("mem3/include/mem3.hrl").
 -include("couch_replicator_api_wrap.hrl").
 -include("couch_replicator.hrl").
 
@@ -133,6 +135,14 @@ ensure_rep_ddoc_exists(RepDb, DDocId) ->
             end
     end,
     ok.
+
+
+-spec ensure_cluster_rep_ddoc_exists(binary()) -> ok.
+ensure_cluster_rep_ddoc_exists(RepDb) ->
+    DDocId = ?REP_DESIGN_DOC,
+    [#shard{name = DbShard} | _] = mem3:shards(RepDb, DDocId),
+    ensure_rep_ddoc_exists(DbShard, DDocId).
+
 
 -spec compare_ejson({[_]}, {[_]}) -> boolean().
 compare_ejson(EJson1, EJson2) ->
