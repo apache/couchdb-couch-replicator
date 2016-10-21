@@ -24,7 +24,7 @@
 -export([start_link/0, add_job/1, remove_job/1, reschedule/0]).
 -export([rep_state/1, find_jobs_by_dbname/1, find_jobs_by_doc/2]).
 -export([job_summary/2, health_threshold/0]).
--export([jobs/0]).
+-export([jobs/0, job/1]).
 
 %% gen_server callbacks
 -export([init/1, terminate/2, code_change/3]).
@@ -748,46 +748,61 @@ ejson_url(DbName) when is_binary(DbName) ->
     DbName.
 
 
+-spec job_ejson(#job{}) -> {[_ | _]}.
+job_ejson(Job) ->
+    Rep = Job#job.rep,
+    Source = ejson_url(Rep#rep.source),
+    Target = ejson_url(Rep#rep.target),
+    History = lists:map(fun(Event) ->
+    EventProps  = case Event of
+        {{crashed, Reason}, _When} ->
+            [{type, crashed}, {reason, crash_reason_json(Reason)}];
+        {Type, _When} ->
+            [{type, Type}]
+        end,
+        {_Type, {_Mega, _Sec, Micros}=When} = Event,
+        {{Y, Mon, D}, {H, Min, S}} = calendar:now_to_universal_time(When),
+        ISO8601 = iolist_to_binary(io_lib:format(
+            "~B-~2..0B-~2..0BT~2..0B-~2..0B-~2..0B.~BZ",
+            [Y,Mon,D,H,Min,S,Micros]
+        )),
+        {[{timestamp, ISO8601} | EventProps]}
+    end, Job#job.history),
+    {BaseID, Ext} = Job#job.id,
+    Pid = case Job#job.pid of
+        undefined ->
+            null;
+        P when is_pid(P) ->
+            ?l2b(pid_to_list(P))
+    end,
+    {[
+        {id, iolist_to_binary([BaseID, Ext])},
+        {pid, Pid},
+        {source, iolist_to_binary(Source)},
+        {target, iolist_to_binary(Target)},
+        {database, Rep#rep.db_name},
+        {user, (Rep#rep.user_ctx)#user_ctx.name},
+        {doc_id, Rep#rep.doc_id},
+        {history, History},
+        {node, node()}
+    ]}.
+
+
 -spec jobs() -> [[tuple()]].
 jobs() ->
     ets:foldl(fun(Job, Acc) ->
-        Rep = Job#job.rep,
-        Source = ejson_url(Rep#rep.source),
-        Target = ejson_url(Rep#rep.target),
-        History = lists:map(fun(Event) ->
-            EventProps  = case Event of
-                {{crashed, Reason}, _When} ->
-                    [{type, crashed}, {reason, crash_reason_json(Reason)}];
-                {Type, _When} ->
-                    [{type, Type}]
-            end,
-            {_Type, {_Mega, _Sec, Micros}=When} = Event,
-            {{Y, Mon, D}, {H, Min, S}} = calendar:now_to_universal_time(When),
-            ISO8601 = iolist_to_binary(io_lib:format(
-                "~B-~2..0B-~2..0BT~2..0B-~2..0B-~2..0B.~BZ",
-                [Y,Mon,D,H,Min,S,Micros]
-            )),
-            {[{timestamp, ISO8601} | EventProps]}
-        end, Job#job.history),
-        {BaseID, Ext} = Job#job.id,
-        Pid = case Job#job.pid of
-            undefined ->
-                null;
-            P when is_pid(P) ->
-                ?l2b(pid_to_list(P))
-        end,
-        [{[
-            {id, iolist_to_binary([BaseID, Ext])},
-            {pid, Pid},
-            {source, iolist_to_binary(Source)},
-            {target, iolist_to_binary(Target)},
-            {database, Rep#rep.db_name},
-            {user, (Rep#rep.user_ctx)#user_ctx.name},
-            {doc_id, Rep#rep.doc_id},
-            {history, History},
-            {node, node()}
-        ]} | Acc]
+        [job_ejson(Job) | Acc]
     end, [], couch_replicator_scheduler).
+
+
+-spec job(job_id()) -> {ok, {[_ | _]}} | {error, not_found}.
+job(JobId) ->
+    case job_by_id(JobId) of
+        {ok, Job} ->
+            {ok, job_ejson(Job)};
+        Error ->
+            Error
+    end.
 
 
 crash_reason_json({_CrashType, Info}) when is_binary(Info) ->
@@ -884,7 +899,7 @@ latest_crash_timestamp_test_() ->
 
 
 last_started_test_() ->
-    [?_assertEqual({0, R, 0}, last_started(job(H))) || {R, H} <- [
+    [?_assertEqual({0, R, 0}, last_started(testjob(H))) || {R, H} <- [
          {0, [added()]},
          {0, [crashed(1)]},
          {1, [started(1)]},
@@ -895,9 +910,9 @@ last_started_test_() ->
 
 
 oldest_job_first_test() ->
-    J0 = job([crashed()]),
-    J1 = job([started(1)]),
-    J2 = job([started(2)]),
+    J0 = testjob([crashed()]),
+    J1 = testjob([started(1)]),
+    J2 = testjob([started(2)]),
     Sort = fun(Jobs) -> lists:sort(fun oldest_job_first/2, Jobs) end,
     ?assertEqual([], Sort([])),
     ?assertEqual([J1], Sort([J1])),
@@ -1312,7 +1327,7 @@ oneshot_running(Id) when is_integer(Id) ->
     }.
 
 
-job(Hist) when is_list(Hist) ->
+testjob(Hist) when is_list(Hist) ->
     #job{history = Hist}.
 
 

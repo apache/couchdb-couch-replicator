@@ -438,8 +438,7 @@ convert_options([{<<"cancel">>, V} | R]) ->
     [{cancel, V} | convert_options(R)];
 convert_options([{IdOpt, V} | R]) when IdOpt =:= <<"_local_id">>;
         IdOpt =:= <<"replication_id">>; IdOpt =:= <<"id">> ->
-    Id = lists:splitwith(fun(X) -> X =/= $+ end, ?b2l(V)),
-    [{id, Id} | convert_options(R)];
+    [{id, couch_replicator_ids:convert(V)} | convert_options(R)];
 convert_options([{<<"create_target">>, V} | _R]) when not is_boolean(V)->
     throw({bad_request, <<"parameter `create_target` must be a boolean">>});
 convert_options([{<<"create_target">>, V} | R]) ->

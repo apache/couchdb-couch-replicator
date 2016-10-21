@@ -14,7 +14,7 @@
 -behaviour(couch_multidb_changes).
 
 -export([start_link/0]).
--export([docs/1]).
+-export([docs/1, doc/2]).
 
 % multidb changes callback
 -export([db_created/2, db_deleted/2, db_found/2, db_change/3]).
@@ -373,6 +373,27 @@ docs(States) ->
                 end
         end
     end, [], ?MODULE).
+
+
+-spec doc(binary(), binary()) -> {ok, {[_]}} | {error, not_found}.
+doc(Db, DocId) ->
+    HealthThreshold = couch_replicator_scheduler:health_threshold(),
+    Res = ets:foldl(fun(_RDoc, [_] = Acc) -> Acc;
+        (RDoc, []) ->
+            {Shard, RDocId} = RDoc#rdoc.id,
+            case {mem3:dbname(Shard), RDocId} of
+                {Db, DocId} ->
+                    [ejson_doc(RDoc, HealthThreshold)];
+                {_OtherDb, _OtherDocId} ->
+                    []
+            end
+    end, [], ?MODULE),
+    case Res of
+        [DocInfo] ->
+            {ok, DocInfo};
+        [] ->
+            {error, not_found}
+    end.
 
 
 -spec ejson_state_info(binary() | nil) -> binary() | null.
