@@ -194,7 +194,12 @@ parse_rep_doc_without_id(RepDoc) ->
 -spec parse_rep_doc({[_]}, #user_ctx{}) -> {ok, #rep{}}.
 parse_rep_doc(Doc, UserCtx) ->
     {ok, Rep} = parse_rep_doc_without_id(Doc, UserCtx),
-    {ok, update_rep_id(Rep)}.
+    case get_value(cancel, Rep#rep.options, false) of
+        true ->
+            {ok, Rep};
+        false ->
+            {ok, update_rep_id(Rep)}
+    end.
 
 
 -spec parse_rep_doc_without_id({[_]}, #user_ctx{}) -> {ok, #rep{}}.
