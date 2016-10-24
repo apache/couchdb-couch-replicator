@@ -12,7 +12,7 @@
 
 -module(couch_replicator_ids).
 
--export([replication_id/1, replication_id/2]).
+-export([replication_id/1, replication_id/2, convert/1]).
 
 -include_lib("couch/include/couch_db.hrl").
 -include("couch_replicator_api_wrap.hrl").
@@ -65,6 +65,17 @@ replication_id(#rep{user_ctx = UserCtx} = Rep, 1) ->
     Src = get_rep_endpoint(UserCtx, Rep#rep.source),
     Tgt = get_rep_endpoint(UserCtx, Rep#rep.target),
     maybe_append_filters([HostName, Src, Tgt], Rep).
+
+
+-spec convert([_] | binary() | {string(), string()}) -> {string(), string()}.
+convert(Id) when is_list(Id) ->
+    convert(?l2b(Id));
+
+convert(Id) when is_binary(Id) ->
+    lists:splitwith(fun(Char) -> Char =/= $+ end, ?b2l(Id));
+
+convert({BaseId, Ext} = Id) when is_list(BaseId), is_list(Ext) ->
+    Id.
 
 
 % Private functions

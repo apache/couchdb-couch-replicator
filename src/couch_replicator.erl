@@ -15,6 +15,7 @@
 -export([replicate/2, ensure_rep_db_exists/0]).
 -export([stream_active_docs_info/3, stream_terminal_docs_info/4]).
 -export([replication_states/0]).
+-export([job/1, doc/3]).
 
 -include_lib("couch/include/couch_db.hrl").
 -include("couch_replicator.hrl").
@@ -230,3 +231,53 @@ filter_replicator_doc_query(_DocState, []) ->
     true;
 filter_replicator_doc_query(State, States) when is_list(States) ->
     lists:member(State, States).
+
+
+-spec job(binary()) -> {ok, {[_]}} | {error, not_found}.
+job(JobId0) when is_binary(JobId0) ->
+    JobId = couch_replicator_ids:convert(JobId0),
+    {Res, _Bad} = rpc:multicall(couch_replicator_scheduler, job, [JobId]),
+    case [JobInfo || {ok, JobInfo} <- Res] of
+        [JobInfo| _] ->
+            {ok, JobInfo};
+        [] ->
+            {error, not_found}
+    end.
+
+
+-spec doc(binary(), binary(), [_]) -> {ok, {[_]}} | {error, not_found}.
+doc(RepDb, DocId, UserCtx) ->
+    {Res, _Bad} = rpc:multicall(couch_replicator_doc_processor, doc, [RepDb, DocId]),
+    case [DocInfo || {ok, DocInfo} <- Res] of
+        [DocInfo| _] ->
+            {ok, DocInfo};
+        [] ->
+            doc_from_db(RepDb, DocId, UserCtx)
+    end.
+
+
+-spec doc_from_db(binary(), binary(), [_]) -> {ok, {[_]}} | {error, not_found}.
+doc_from_db(RepDb, DocId, UserCtx) ->
+    case fabric:open_doc(RepDb, DocId, [UserCtx, ejson_body]) of
+        {ok, Doc} ->
+            {Props} = couch_doc:to_json_obj(Doc, []),
+            State = couch_util:get_value(<<"_replication_state">>, Props, null),
+            {StateInfo, ErrorCount} = case State of
+                <<"completed">> ->
+                    {couch_util:get_value(<<"_replication_stats">>, Props, null), 0};
+                <<"failed">> ->
+                    {couch_util:get_value(<<"_replication_state_reason">>, Props, null), 1};
+                _OtherState ->
+                    {null, 0}
+            end,
+            {ok, {[
+                {doc_id, DocId},
+                {database, RepDb},
+                {id, null},
+                {state, State},
+                {error_count, ErrorCount},
+                {info, StateInfo}
+            ]}};
+         {not_found, _Reason} ->
+            {error, not_found}
+    end.
