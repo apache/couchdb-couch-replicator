@@ -175,18 +175,13 @@ init(_) ->
 
 
 handle_call({add_job, Job}, _From, State) ->
-    case add_job_int(Job) of
-        true ->
-            ok = maybe_remove_job_int(Job#job.id, State),
-            ok = maybe_start_newly_added_job(Job, State),
-            couch_stats:increment_counter([couch_replicator, jobs, adds]),
-            TotalJobs = ets:info(?MODULE, size),
-            couch_stats:update_gauge([couch_replicator, jobs, total], TotalJobs),
-            {reply, ok, State};
-        false ->
-            couch_stats:increment_counter([couch_replicator, jobs, duplicate_adds]),
-            {reply, {error, already_added}, State}
-    end;
+    ok = maybe_remove_job_int(Job#job.id, State),
+    true = add_job_int(Job),
+    ok = maybe_start_newly_added_job(Job, State),
+    couch_stats:increment_counter([couch_replicator, jobs, adds]),
+    TotalJobs = ets:info(?MODULE, size),
+    couch_stats:update_gauge([couch_replicator, jobs, total], TotalJobs),
+    {reply, ok, State};
 
 handle_call({remove_job, Id}, _From, State) ->
     ok = maybe_remove_job_int(Id, State),
