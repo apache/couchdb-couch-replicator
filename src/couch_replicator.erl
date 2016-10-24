@@ -164,8 +164,15 @@ stream_terminal_docs_info(Db, Cb, UserAcc, States) ->
     try fabric:query_view(Db, DDoc, View, QueryCb, Acc, Args) of
     {ok, {Db, Cb, UserAcc1, States}} ->
         UserAcc1
-    catch error:database_does_not_exist ->
-        UserAcc
+    catch
+        error:database_does_not_exist ->
+            UserAcc;
+        error:{badmatch, {not_found, Reason}} ->
+            Msg = "Could not find _design/~s ~s view in replicator db ~s : ~p",
+            couch_log:error(Msg, [DDoc, View, Db, Reason]),
+            couch_replicator_docs:ensure_cluster_rep_ddoc_exists(Db),
+            timer:sleep(1000),
+            stream_terminal_docs_info(Db, Cb, UserAcc, States)
     end.
 
 
