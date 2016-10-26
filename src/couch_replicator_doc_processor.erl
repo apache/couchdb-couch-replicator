@@ -437,7 +437,7 @@ ejson_doc(#rdoc{state = RepState} = RDoc, _HealthThreshold) ->
     } = RDoc,
     {[
         {doc_id, DocId},
-        {database, mem3:dbname(DbName)},
+        {database, DbName},
         {id, ejson_rep_id(RepId)},
         {state, RepState},
         {info, ejson_state_info(StateInfo)},
