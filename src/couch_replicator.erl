@@ -514,44 +514,6 @@ code_change(_OldVsn, #rep_state{}=State, _Extra) ->
     {ok, State}.
 
 
-headers_strip_creds([], Acc) ->
-    lists:reverse(Acc);
-headers_strip_creds([{Key, Value0} | Rest], Acc) ->
-    Value = case string:to_lower(Key) of
-    "authorization" ->
-        "****";
-    _ ->
-        Value0
-    end,
-    headers_strip_creds(Rest, [{Key, Value} | Acc]).
-
-
-httpdb_strip_creds(#httpdb{url = Url, headers = Headers} = HttpDb) ->
-    HttpDb#httpdb{
-        url = couch_util:url_strip_password(Url),
-        headers = headers_strip_creds(Headers, [])
-    };
-httpdb_strip_creds(LocalDb) ->
-    LocalDb.
-
-
-rep_strip_creds(#rep{source = Source, target = Target} = Rep) ->
-    Rep#rep{
-        source = httpdb_strip_creds(Source),
-        target = httpdb_strip_creds(Target)
-    }.
-
-
-state_strip_creds(#rep_state{rep_details = Rep, source = Source, target = Target} = State) ->
-    % #rep_state contains the source and target at the top level and also
-    % in the nested #rep_details record
-    State#rep_state{
-        rep_details = rep_strip_creds(Rep),
-        source = httpdb_strip_creds(Source),
-        target = httpdb_strip_creds(Target)
-    }.
-
-
 terminate(normal, #rep_state{rep_details = #rep{id = RepId} = Rep,
     checkpoint_history = CheckpointHistory} = State) ->
     terminate_cleanup(State),
@@ -566,7 +528,7 @@ terminate(shutdown, #rep_state{rep_details = #rep{id = RepId}} = State) ->
 terminate(shutdown, {error, Class, Error, Stack, InitArgs}) ->
     #rep{id=RepId} = InitArgs,
     couch_stats:increment_counter([couch_replicator, failed_starts]),
-    CleanInitArgs = rep_strip_creds(InitArgs),
+    CleanInitArgs = couch_replicator_utils:format_rep_record(InitArgs),
     couch_log:error("~p:~p: Replication failed to start for args ~p: ~p",
              [Class, Error, CleanInitArgs, Stack]),
     case Error of
@@ -600,8 +562,23 @@ terminate_cleanup(State) ->
 
 
 format_status(_Opt, [_PDict, State]) ->
-    [{data, [{"State", state_strip_creds(State)}]}].
-
+    Rep = couch_replicator_utils:format_rep_record(State#rep_state.rep_details),
+    [{data, [
+        {"State", ?from_record(rep_state, State, [
+            start_seq,
+            committed_seq,
+            current_through_seq,
+            %%seqs_in_progress = [],
+            highest_seq_done,
+            rep_starttime,
+            src_starttime,
+            tgt_starttime,
+            timer, % checkpoint timer
+            session_id,
+            source_seq,
+            use_checkpoints,
+            checkpoint_interval])
+       ++ [{rep_details, Rep}]}]}].
 
 do_last_checkpoint(#rep_state{seqs_in_progress = [],
     highest_seq_done = {_Ts, ?LOWEST_SEQ}} = State) ->
@@ -1035,3 +1012,38 @@ rep_stats(State) ->
         {doc_write_failures, couch_replicator_stats:doc_write_failures(Stats)},
         {checkpointed_source_seq, CommittedSeq}
     ].
+
+-ifdef(TEST).
+
+-include_lib("eunit/include/eunit.hrl").
+
+format_status_test() ->
+    S = "https://user_foo:top_secret@account_bar1.cloudant.com/database_baz/",
+    T = "https://user_foo:top_secret@account_bar2.cloudant.com/baz_backup/",
+    Rep0 = list_to_tuple([rep | record_info(fields, rep)]),
+    State0 = list_to_tuple([rep_state | record_info(fields, rep_state)]),
+    Rep = Rep0#rep{source = #httpdb{url = S}, target = #httpdb{url = T}},
+    State = State0#rep_state{rep_details = Rep},
+    ?assertEqual([{data, [{"State", [
+        {start_seq,start_seq},
+        {committed_seq,committed_seq},
+        {current_through_seq,current_through_seq},
+        {highest_seq_done,highest_seq_done},
+        {rep_starttime,rep_starttime},
+        {src_starttime,src_starttime},
+        {tgt_starttime,tgt_starttime},
+        {timer,timer},
+        {session_id,session_id},
+        {source_seq,source_seq},
+        {use_checkpoints,use_checkpoints},
+        {checkpoint_interval,checkpoint_interval},
+        {rep_details,[{id,id},
+            {options,options},
+            {view,view},
+            {doc_id,doc_id},
+            {db_name,db_name},
+            {source,"https://user_foo:*****@account_bar1.cloudant.com/database_baz/"},
+            {target,"https://user_foo:*****@account_bar2.cloudant.com/baz_backup/"}]}
+    ]}]}], format_status(normal, [[], State])).
+
+-endif.

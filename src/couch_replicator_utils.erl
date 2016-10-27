@@ -20,6 +20,7 @@
 -export([mp_parse_doc/2]).
 
 -export([handle_db_event/3]).
+-export([format_rep_record/1]).
 
 -include_lib("couch/include/couch_db.hrl").
 -include_lib("ibrowse/include/ibrowse.hrl").
@@ -509,10 +510,43 @@ ejsort_array([], Acc)->
 ejsort_array([V | R], Acc) ->
     ejsort_array(R, [ejsort(V) | Acc]).
 
+format_rep_record(#rep{} = Rep) ->
+    ?from_record(rep, Rep, [
+        id,
+        options,
+        view,
+        doc_id,
+        db_name
+    ])
+     ++ [
+        {source, format_httpdb(Rep#rep.source)},
+        {target, format_httpdb(Rep#rep.target)}
+    ].
+
+format_httpdb(#httpdb{url = Url}) ->
+    couch_util:url_strip_password(Url);
+format_httpdb(LocalDb) ->
+    LocalDb.
+
 
 -ifdef(TEST).
 
 -include_lib("eunit/include/eunit.hrl").
+
+format_rep_record_test() ->
+    Rep0 = list_to_tuple([rep | record_info(fields, rep)]),
+    S = "https://user_foo:top_secret@account_bar1.cloudant.com/database_baz/",
+    T = "https://user_foo:top_secret@account_bar2.cloudant.com/baz_backup/",
+    Rep = Rep0#rep{source = #httpdb{url = S}, target = #httpdb{url = T}},
+    ?assertEqual([
+                  {id,id},
+        {options,options},
+        {view,view},
+        {doc_id,doc_id},
+        {db_name,db_name},
+        {source,"https://user_foo:*****@account_bar1.cloudant.com/database_baz/"},
+        {target,"https://user_foo:*****@account_bar2.cloudant.com/baz_backup/"}
+    ], format_rep_record(Rep)).
 
 ejsort_basic_values_test() ->
     ?assertEqual(ejsort(0), 0),

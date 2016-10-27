@@ -18,7 +18,7 @@
 -export([start_link/5]).
 
 % gen_server callbacks
--export([init/1, terminate/2, code_change/3]).
+-export([init/1, terminate/2, code_change/3, format_status/2]).
 -export([handle_call/3, handle_cast/2, handle_info/2]).
 
 -include_lib("couch/include/couch_db.hrl").
@@ -209,6 +209,28 @@ terminate(_Reason, State) ->
 
 code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
+
+format_status(_Opt, [_PDict, #state{source = S, target = T} = State]) ->
+    [{data, [{"State", ?from_record(state, State, [
+        cp,
+        loop,
+        max_parallel_conns,
+        writer,
+        pending_fetch,
+        flush_waiter,
+        source_db_compaction_notifier,
+        target_db_compaction_notifier,
+        batch, % = #batch{docs = [], size = 0}
+        max_retries
+    ]) ++ [
+        {source, format_db(S)},
+        {target, format_db(T)}
+    ]}]}].
+
+format_db(#db{} = Db) ->
+    couch_db:format_db_record(Db);
+format_db(Url) ->
+    couch_util:url_strip_password(Url).
 
 
 queue_fetch_loop(Source, Target, Parent, Cp, ChangesManager) ->
