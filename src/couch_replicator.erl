@@ -564,7 +564,8 @@ terminate_cleanup(State) ->
 format_status(_Opt, [_PDict, State]) ->
     Rep = couch_replicator_utils:format_rep_record(State#rep_state.rep_details),
     [{data, [
-        {"State", ?from_record(rep_state, State, [
+        {"State", [{rep_details, Rep} | ?from_record(rep_state, State, [
+            session_id,
             start_seq,
             committed_seq,
             current_through_seq,
@@ -574,11 +575,10 @@ format_status(_Opt, [_PDict, State]) ->
             src_starttime,
             tgt_starttime,
             timer, % checkpoint timer
-            session_id,
             source_seq,
             use_checkpoints,
             checkpoint_interval])
-       ++ [{rep_details, Rep}]}]}].
+       ]}]}].
 
 do_last_checkpoint(#rep_state{seqs_in_progress = [],
     highest_seq_done = {_Ts, ?LOWEST_SEQ}} = State) ->
@@ -1025,6 +1025,15 @@ format_status_test() ->
     Rep = Rep0#rep{source = #httpdb{url = S}, target = #httpdb{url = T}},
     State = State0#rep_state{rep_details = Rep},
     ?assertEqual([{data, [{"State", [
+        {rep_details,[
+            {source,"https://user_foo:*****@account_bar1.cloudant.com/database_baz/"},
+            {target,"https://user_foo:*****@account_bar2.cloudant.com/baz_backup/"},
+            {id,id},
+            {db_name,db_name},
+            {doc_id,doc_id},
+            {view,view},
+            {options,options}]},
+        {session_id,session_id},
         {start_seq,start_seq},
         {committed_seq,committed_seq},
         {current_through_seq,current_through_seq},
@@ -1033,17 +1042,9 @@ format_status_test() ->
         {src_starttime,src_starttime},
         {tgt_starttime,tgt_starttime},
         {timer,timer},
-        {session_id,session_id},
         {source_seq,source_seq},
         {use_checkpoints,use_checkpoints},
-        {checkpoint_interval,checkpoint_interval},
-        {rep_details,[{id,id},
-            {options,options},
-            {view,view},
-            {doc_id,doc_id},
-            {db_name,db_name},
-            {source,"https://user_foo:*****@account_bar1.cloudant.com/database_baz/"},
-            {target,"https://user_foo:*****@account_bar2.cloudant.com/baz_backup/"}]}
+        {checkpoint_interval,checkpoint_interval}
     ]}]}], format_status(normal, [[], State])).
 
 -endif.

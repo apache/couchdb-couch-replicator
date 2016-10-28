@@ -511,16 +511,15 @@ ejsort_array([V | R], Acc) ->
     ejsort_array(R, [ejsort(V) | Acc]).
 
 format_rep_record(#rep{} = Rep) ->
-    ?from_record(rep, Rep, [
-        id,
-        options,
-        view,
-        doc_id,
-        db_name
-    ])
-     ++ [
+    [
         {source, format_httpdb(Rep#rep.source)},
         {target, format_httpdb(Rep#rep.target)}
+            | ?from_record(rep, Rep, [
+                id,
+                db_name,
+                doc_id,
+                view,
+                options])
     ].
 
 format_httpdb(#httpdb{url = Url}) ->
@@ -539,13 +538,13 @@ format_rep_record_test() ->
     T = "https://user_foo:top_secret@account_bar2.cloudant.com/baz_backup/",
     Rep = Rep0#rep{source = #httpdb{url = S}, target = #httpdb{url = T}},
     ?assertEqual([
-                  {id,id},
-        {options,options},
-        {view,view},
-        {doc_id,doc_id},
-        {db_name,db_name},
         {source,"https://user_foo:*****@account_bar1.cloudant.com/database_baz/"},
-        {target,"https://user_foo:*****@account_bar2.cloudant.com/baz_backup/"}
+        {target,"https://user_foo:*****@account_bar2.cloudant.com/baz_backup/"},
+        {id,id},
+        {db_name,db_name},
+        {doc_id,doc_id},
+        {view,view},
+        {options,options}
     ], format_rep_record(Rep)).
 
 ejsort_basic_values_test() ->
