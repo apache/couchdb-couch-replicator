@@ -155,9 +155,7 @@ format_status(_Opt, [_PDict, #state{url = Url, limit = Limit}]) ->
     [{data, [{"State", [
         {url, couch_util:url_strip_password(Url)},
         {limit, Limit}
-    ]}]}];
-format_status(_Opt, [_PDict, State]) ->
-    [{data, [{"State", State}]}].
+    ]}]}].
 
 monitor_client(Callers, Worker, {ClientPid, _}) ->
     [{Worker, erlang:monitor(process, ClientPid)} | Callers].
