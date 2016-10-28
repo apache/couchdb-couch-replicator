@@ -23,7 +23,7 @@
 
 % gen_server callbacks
 -export([start_link/0, init/1, handle_call/3, handle_info/2, handle_cast/2]).
--export([code_change/3, terminate/2]).
+-export([code_change/3, terminate/2, format_status/2]).
 
 % changes callbacks
 -export([changes_reader/3, changes_reader_cb/3]).
@@ -362,6 +362,14 @@ code_change(1, State, _Extra) ->
     {ok, erlang:append_element(State, [node() | nodes()])};
 code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
+
+format_status(_Opt, [_PDict, #state{} = State]) ->
+    [{data, [{"State", ?from_record(state, State, [
+        event_listener,
+        scan_pid,
+        max_retries,
+        epoch
+    ])}]}].
 
 
 start_changes_reader(DbName, Since, Epoch) ->
@@ -980,3 +988,18 @@ get_json_value(Key, Props, Default) when is_binary(Key) ->
         Else ->
             Else
     end.
+
+-ifdef(TEST).
+
+-include_lib("couch/include/couch_eunit.hrl").
+
+format_status_test() ->
+    State = list_to_tuple([state | record_info(fields, state)]),
+    ?assertEqual([{data, [{"State", [
+        {event_listener, event_listener},
+        {scan_pid, scan_pid},
+        {max_retries, max_retries},
+        {epoch, epoch}
+    ]}]}], format_status(normal, [[], State])).
+
+-endif.

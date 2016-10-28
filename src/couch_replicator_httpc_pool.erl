@@ -20,7 +20,7 @@
 
 % gen_server API
 -export([init/1, handle_call/3, handle_info/2, handle_cast/2]).
--export([code_change/3, terminate/2]).
+-export([code_change/3, terminate/2, format_status/2]).
 
 -include_lib("couch/include/couch_db.hrl").
 
@@ -151,6 +151,12 @@ terminate(_Reason, State) ->
     lists:foreach(fun ibrowse_http_client:stop/1, State#state.free),
     lists:foreach(fun ibrowse_http_client:stop/1, State#state.busy).
 
+format_status(_Opt, [_PDict, #state{url = Url, limit = Limit}]) ->
+    [{data, [{"State", [
+        {url, couch_util:url_strip_password(Url)},
+        {limit, Limit}
+    ]}]}].
+
 monitor_client(Callers, Worker, {ClientPid, _}) ->
     [{Worker, erlang:monitor(process, ClientPid)} | Callers].
 
@@ -190,3 +196,18 @@ release_worker_internal(Worker, State) ->
    false ->
         State#state{callers = NewCallers0}
    end.
+
+-ifdef(TEST).
+
+-include_lib("eunit/include/eunit.hrl").
+
+format_status_test() ->
+    Url = "https://user_foo:top_secret@account_bar1.cloudant.com/database_baz/",
+    State0 = list_to_tuple([state | record_info(fields, state)]),
+    State = State0#state{url = Url},
+    ?assertEqual([{data, [{"State", [
+        {url, "https://user_foo:*****@account_bar1.cloudant.com/database_baz/"},
+        {limit, limit}
+    ]}]}], format_status(normal, [[], State])).
+
+-endif.
