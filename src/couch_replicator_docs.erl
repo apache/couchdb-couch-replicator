@@ -204,10 +204,17 @@ parse_rep_doc_without_id(RepDoc) ->
 -spec parse_rep_doc({[_]}, #user_ctx{}) -> {ok, #rep{}}.
 parse_rep_doc(Doc, UserCtx) ->
     {ok, Rep} = parse_rep_doc_without_id(Doc, UserCtx),
-    case get_value(cancel, Rep#rep.options, false) of
-        true ->
+    Cancel = get_value(cancel, Rep#rep.options, false),
+    Id = get_value(id, Rep#rep.options, nil),
+    case {Cancel, Id} of
+        {true, nil} ->
+            % Cancel request with no id, must parse id out of body contents
+            {ok, update_rep_id(Rep)};
+        {true, Id} ->
+            % Cancel request with an id specified, so do not parse id from body
             {ok, Rep};
-        false ->
+        {false, _Id} ->
+            % Not a cancel request, regular replication doc
             {ok, update_rep_id(Rep)}
     end.
 
