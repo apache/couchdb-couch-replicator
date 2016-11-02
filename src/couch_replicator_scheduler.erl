@@ -124,7 +124,9 @@ job_summary(JobId, HealthThreshold) ->
                 {target, iolist_to_binary(ejson_url(Rep#rep.target))},
                 {state, State},
                 {info, Info},
-                {error_count, ErrorCount}
+                {error_count, ErrorCount},
+                {last_updated, last_updated(History)},
+                {start_time, couch_replicator_utils:iso8601(Rep#rep.start_time)}
             ];
         {error, not_found} ->
             nil  % Job might have just completed
@@ -748,20 +750,14 @@ job_ejson(Job) ->
     Rep = Job#job.rep,
     Source = ejson_url(Rep#rep.source),
     Target = ejson_url(Rep#rep.target),
-    History = lists:map(fun(Event) ->
-    EventProps  = case Event of
-        {{crashed, Reason}, _When} ->
-            [{type, crashed}, {reason, crash_reason_json(Reason)}];
-        {Type, _When} ->
-            [{type, Type}]
+    History = lists:map(fun({Type, When}) ->
+        EventProps  = case Type of
+            {crashed, Reason} ->
+                [{type, crashed}, {reason, crash_reason_json(Reason)}];
+            Type ->
+                [{type, Type}]
         end,
-        {_Type, {_Mega, _Sec, Micros}=When} = Event,
-        {{Y, Mon, D}, {H, Min, S}} = calendar:now_to_universal_time(When),
-        ISO8601 = iolist_to_binary(io_lib:format(
-            "~B-~2..0B-~2..0BT~2..0B-~2..0B-~2..0B.~BZ",
-            [Y,Mon,D,H,Min,S,Micros]
-        )),
-        {[{timestamp, ISO8601} | EventProps]}
+        {[{timestamp, couch_replicator_utils:iso8601(When)} | EventProps]}
     end, Job#job.history),
     {BaseID, Ext} = Job#job.id,
     Pid = case Job#job.pid of
@@ -779,7 +775,8 @@ job_ejson(Job) ->
         {user, (Rep#rep.user_ctx)#user_ctx.name},
         {doc_id, Rep#rep.doc_id},
         {history, History},
-        {node, node()}
+        {node, node()},
+        {start_time, couch_replicator_utils:iso8601(Rep#rep.start_time)}
     ]}.
 
 
@@ -806,6 +803,11 @@ crash_reason_json(Reason) when is_binary(Reason) ->
     Reason;
 crash_reason_json(Error) ->
     couch_replicator_utils:rep_error_to_binary(Error).
+
+
+-spec last_updated([_]) -> binary().
+last_updated([{_Type, When} | _]) ->
+    couch_replicator_utils:iso8601(When).
 
 
 -spec is_continuous(#job{}) -> boolean().

@@ -20,6 +20,7 @@
 -export([rep_error_to_binary/1]).
 -export([get_json_value/2, get_json_value/3]).
 -export([pp_rep_id/1]).
+-export([iso8601/1]).
 
 -export([handle_db_event/3]).
 
@@ -135,3 +136,10 @@ sum_stats(S1, S2) ->
 
 parse_rep_doc(Props, UserCtx) ->
     couch_replicator_docs:parse_rep_doc(Props, UserCtx).
+
+
+-spec iso8601(erlang:timestamp()) -> binary().
+iso8601({_Mega, _Sec, _Micro} = Timestamp) ->
+    {{Y, Mon, D}, {H, Min, S}} = calendar:now_to_universal_time(Timestamp),
+    Format = "~B-~2..0B-~2..0BT~2..0B-~2..0B-~2..0BZ",
+    iolist_to_binary(io_lib:format(Format, [Y, Mon, D, H, Min, S])).
