@@ -227,8 +227,34 @@ updated_doc(Id, Rep, Filter) ->
 worker_returned(Ref, Id, {ok, RepId}) ->
     case ets:lookup(?MODULE, Id) of
     [#rdoc{worker = Ref} = Row] ->
-        NewRow = update_docs_row(Row, RepId),
-        true = ets:insert(?MODULE, NewRow#rdoc{last_updated = os:timestamp()}),
+        Row0 = Row#rdoc{
+            state = scheduled,
+            errcnt = 0,
+            worker = nil,
+            last_updated = os:timestamp()
+        },
+        NewRow = case Row0 of
+            #rdoc{rid = RepId, filter = user} ->
+                % Filtered replication id didn't change.
+                Row0;
+            #rdoc{rid = nil, filter = user} ->
+                % Calculated new replication id for a filtered replication. Make sure
+                % to schedule another check as filter code could change. Replications
+                % starts could have been failing, so also clear error count.
+                Row0#rdoc{rid = RepId};
+            #rdoc{rid = OldRepId, filter = user} ->
+                % Replication id of existing replication job with filter has changed.
+                % Remove old replication job from scheduler and schedule check to check
+                % for future changes.
+                ok = couch_replicator_scheduler:remove_job(OldRepId),
+                Msg = io_lib:format("Replication id changed: ~p -> ~p", [OldRepId, RepId]),
+                Row0#rdoc{info = couch_util:to_binary(Msg)};
+            #rdoc{rid = nil} ->
+                % Calculated new replication id for non-filtered replication. Remove
+                % replication doc body, after this we won't needed any more.
+                Row0#rdoc{rep=nil, rid=RepId, info=nil}
+        end,
+        true = ets:insert(?MODULE, NewRow),
         ok = maybe_start_worker(Id);
     _ ->
         ok  % doc could have been deleted, ignore
@@ -261,43 +287,6 @@ worker_returned(Ref, Id, {permanent_failure, _Reason}) ->
         ok  % doc could have been deleted, ignore
     end,
     ok.
-
-
-% Filtered replication id didn't change.
--spec update_docs_row(#rdoc{}, rep_id()) -> #rdoc{}.
-update_docs_row(#rdoc{rid = RepId, filter = user} = Row, RepId) ->
-    Row#rdoc{state = scheduled, errcnt = 0, worker = nil};
-
-% Calculated new replication id for a filtered replication. Make sure
-% to schedule another check as filter code could change. Replications starts
-% could have been failing, so also clear error count.
-update_docs_row(#rdoc{rid = nil, filter = user} = Row, RepId) ->
-    Row#rdoc{rid = RepId, state = scheduled, errcnt = 0, worker = nil};
-
-% Replication id of existing replication job with filter has changed.
-% Remove old replication job from scheduler and schedule check to check for
-% future changes.
-update_docs_row(#rdoc{rid = OldRepId, filter = user} = Row, RepId) ->
-    ok = couch_replicator_scheduler:remove_job(OldRepId),
-    Msg = io_lib:format("Replication id changed: ~p -> ~p", [OldRepId, RepId]),
-    Row#rdoc{
-        rid = RepId,
-        state = scheduled,
-        info = couch_util:to_binary(Msg),
-        errcnt = 0,
-        worker = nil
-     };
-
-% Calculated new replication id for non-filtered replication.
- update_docs_row(#rdoc{rid = nil} = Row, RepId) ->
-    Row#rdoc{
-        rep = nil, % remove replication doc body, after this we won't needed any more
-        rid = RepId,
-        state = scheduled,
-        info = nil,
-        errcnt = 0,
-        worker = nil
-     }.
 
 
 -spec error_backoff(non_neg_integer()) -> seconds().
