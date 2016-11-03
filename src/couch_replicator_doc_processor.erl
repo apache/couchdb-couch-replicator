@@ -46,7 +46,8 @@
     filter :: filter_type() | '_',
     info :: binary() | nil | '_',
     errcnt :: non_neg_integer() | '_',
-    worker :: reference() | nil | '_'
+    worker :: reference() | nil | '_',
+    last_updated :: erlang:timestamp() | '_'
 }).
 
 
@@ -79,7 +80,8 @@ db_change(DbName, {ChangeProps} = Change, Server) ->
     _Tag:Error ->
         {RepProps} = get_json_value(doc, ChangeProps),
         DocId = get_json_value(<<"_id">>, RepProps),
-        couch_replicator_docs:update_failed(DbName, DocId, Error)
+        Timestamp = os:timestamp(),
+        couch_replicator_docs:update_failed(DbName, DocId, Error, Timestamp)
     end,
     Server.
 
@@ -127,7 +129,7 @@ process_updated({DbName, _DocId} = Id, JsonRepDoc) ->
     % failure in the document. User will have to delete and re-create the document
     % to fix the problem.
     Rep0 = couch_replicator_docs:parse_rep_doc_without_id(JsonRepDoc),
-    Rep = Rep0#rep{db_name = DbName},
+    Rep = Rep0#rep{db_name = DbName, start_time = os:timestamp()},
     Filter = case couch_replicator_filters:parse(Rep#rep.options) of
     {ok, nil} ->
         nil;
@@ -213,7 +215,8 @@ updated_doc(Id, Rep, Filter) ->
         filter = Filter,
         info = nil,
         errcnt = 0,
-        worker = nil
+        worker = nil,
+        last_updated = os:timestamp()
     },
     true = ets:insert(?MODULE, Row),
     ok = maybe_start_worker(Id),
@@ -224,7 +227,8 @@ updated_doc(Id, Rep, Filter) ->
 worker_returned(Ref, Id, {ok, RepId}) ->
     case ets:lookup(?MODULE, Id) of
     [#rdoc{worker = Ref} = Row] ->
-        true = ets:insert(?MODULE, update_docs_row(Row, RepId)),
+        NewRow = update_docs_row(Row, RepId),
+        true = ets:insert(?MODULE, NewRow#rdoc{last_updated = os:timestamp()}),
         ok = maybe_start_worker(Id);
     _ ->
         ok  % doc could have been deleted, ignore
@@ -239,7 +243,8 @@ worker_returned(Ref, Id, {temporary_error, Reason}) ->
             state = error,
             info = Reason,
             errcnt = ErrCnt + 1,
-            worker = nil
+            worker = nil,
+            last_updated = os:timestamp()
         },
         true = ets:insert(?MODULE, NewRow),
         ok = maybe_start_worker(Id);
@@ -433,7 +438,9 @@ ejson_doc(#rdoc{state = RepState} = RDoc, _HealthThreshold) ->
        id = {DbName, DocId},
        info = StateInfo,
        rid = RepId,
-       errcnt = ErrorCount
+       errcnt = ErrorCount,
+       last_updated = StateTime,
+       rep = Rep
     } = RDoc,
     {[
         {doc_id, DocId},
@@ -442,7 +449,9 @@ ejson_doc(#rdoc{state = RepState} = RDoc, _HealthThreshold) ->
         {state, RepState},
         {info, ejson_state_info(StateInfo)},
         {error_count, ErrorCount},
-        {node, node()}
+        {node, node()},
+        {last_updated, couch_replicator_utils:iso8601(StateTime)},
+        {start_time, couch_replicator_utils:iso8601(Rep#rep.start_time)}
     ]}.
 
 
@@ -510,7 +519,7 @@ t_regular_change() ->
 % a running job with same Id found.
 t_change_with_existing_job() ->
     ?_test(begin
-        mock_existing_jobs_lookup([#rep{id = ?R2}]),
+        mock_existing_jobs_lookup([test_rep(?R2)]),
         ?assertEqual(ok, process_change(?DB, change())),
         ?assert(ets:member(?MODULE, {?DB, ?DOC1})),
         ?assert(started_worker({?DB, ?DOC1}))
@@ -520,7 +529,7 @@ t_change_with_existing_job() ->
 % Change is a deletion, and job is running, so remove job.
 t_deleted_change() ->
     ?_test(begin
-        mock_existing_jobs_lookup([#rep{id = ?R2}]),
+        mock_existing_jobs_lookup([test_rep(?R2)]),
         ?assertEqual(ok, process_change(?DB, deleted_change())),
         ?assert(removed_job(?R2))
     end).
@@ -615,6 +624,10 @@ t_ejson_docs() ->
         EJsonDocs = docs([]),
         ?assertMatch([{[_|_]}], EJsonDocs),
         [{DocProps}] = EJsonDocs,
+        {value, StateTime, DocProps1} = lists:keytake(last_updated, 1, DocProps),
+        ?assertMatch({last_updated, BinVal1} when is_binary(BinVal1), StateTime),
+        {value, StartTime, DocProps2} = lists:keytake(start_time, 1, DocProps1),
+        ?assertMatch({start_time, BinVal2} when is_binary(BinVal2), StartTime),
         ExpectedProps = [
             {database, ?DB},
             {doc_id, ?DOC1},
@@ -624,7 +637,7 @@ t_ejson_docs() ->
             {node, node()},
             {state, initializing}
         ],
-        ?assertEqual(ExpectedProps, lists:usort(DocProps))
+        ?assertEqual(ExpectedProps, lists:usort(DocProps2))
     end).
 
 
@@ -641,7 +654,7 @@ setup() ->
     meck:expect(couch_replicator_doc_processor_worker, spawn_worker, 3, wref),
     meck:expect(couch_replicator_scheduler, remove_job, 1, ok),
     meck:expect(couch_replicator_docs, remove_state_fields, 2, ok),
-    meck:expect(couch_replicator_docs, update_failed, 3, ok),
+    meck:expect(couch_replicator_docs, update_failed, 4, ok),
     {ok, Pid} = start_link(),
     Pid.
 
@@ -662,7 +675,7 @@ started_worker(Id) ->
 
 
 removed_job(Id) ->
-    meck:called(couch_replicator_scheduler, remove_job, [#rep{id = Id}]).
+    meck:called(couch_replicator_scheduler, remove_job, [test_rep(Id)]).
 
 
 did_not_remove_state_fields() ->
@@ -680,6 +693,10 @@ updated_doc_with_failed_state() ->
 mock_existing_jobs_lookup(ExistingJobs) ->
     meck:expect(couch_replicator_scheduler, find_jobs_by_doc,
             fun(?DB, ?DOC1) -> ExistingJobs end).
+
+
+test_rep(Id) ->
+  #rep{id = Id, start_time = {0, 0, 0}}.
 
 
 change() ->

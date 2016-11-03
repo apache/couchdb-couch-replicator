@@ -78,7 +78,8 @@ maybe_start_replication(Id, RepWithoutId) ->
         {temporary_error, Reason};
     {permanent_failure, Reason} ->
         {DbName, DocId} = Id,
-        couch_replicator_docs:update_failed(DbName, DocId, Reason),
+        StartTime = Rep#rep.start_time,
+        couch_replicator_docs:update_failed(DbName, DocId, Reason, StartTime),
         {permanent_failure, Reason}
     end.
 
@@ -199,7 +200,7 @@ setup() ->
     meck:expect(couch_replicator_scheduler, add_job, 1, ok),
     meck:expect(config, get, fun(_, _, Default) -> Default end),
     meck:expect(couch_server, get_uuid, 0, this_is_snek),
-    meck:expect(couch_replicator_docs, update_failed, 3, ok),
+    meck:expect(couch_replicator_docs, update_failed, 4, ok),
     meck:expect(couch_replicator_scheduler, rep_state, 1, nil),
     ok.
 

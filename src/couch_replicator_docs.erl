@@ -19,8 +19,8 @@
 -export([ensure_cluster_rep_ddoc_exists/1]).
 -export([
     remove_state_fields/2,
-    update_doc_completed/3,
-    update_failed/3,
+    update_doc_completed/4,
+    update_failed/4,
     update_rep_id/1
 ]).
 
@@ -59,17 +59,19 @@ remove_state_fields(DbName, DocId) ->
         {<<"_replication_state_reason">>, undefined},
         {<<"_replication_stats">>, undefined}]).
 
--spec update_doc_completed(binary(), binary(), [_]) -> any().
-update_doc_completed(DbName, DocId, Stats) ->
+-spec update_doc_completed(binary(), binary(), [_], erlang:timestamp()) -> any().
+update_doc_completed(DbName, DocId, Stats, StartTime) ->
+    StartTimeBin = couch_replicator_utils:iso8601(StartTime),
     update_rep_doc(DbName, DocId, [
         {<<"_replication_state">>, <<"completed">>},
         {<<"_replication_state_reason">>, undefined},
+        {<<"_replication_start_time">>,  StartTimeBin},
         {<<"_replication_stats">>, {Stats}}]),
     couch_stats:increment_counter([couch_replicator, docs, completed_state_updates]).
 
 
--spec update_failed(binary(), binary(), any()) -> any().
-update_failed(DbName, DocId, Error) ->
+-spec update_failed(binary(), binary(), any(), erlang:timestamp()) -> any().
+update_failed(DbName, DocId, Error, StartTime) ->
     Reason = case Error of
         {bad_rep_doc, Reas} ->
             Reas;
@@ -77,8 +79,10 @@ update_failed(DbName, DocId, Error) ->
             to_binary(Error)
     end,
     couch_log:error("Error processing replication doc `~s`: ~s", [DocId, Reason]),
+    StartTimeBin = couch_replicator_utils:iso8601(StartTime),
     update_rep_doc(DbName, DocId, [
         {<<"_replication_state">>, <<"failed">>},
+        {<<"_replication_start_time">>, StartTimeBin},
         {<<"_replication_state_reason">>, Reason}]),
    couch_stats:increment_counter([couch_replicator, docs, failed_state_updates]).
 
@@ -295,9 +299,10 @@ update_rep_doc(RepDbName, #doc{body = {RepDocBody}} = RepDoc, KVs, _Try) ->
                     Body;
                 _ ->
                     Body1 = lists:keystore(K, 1, Body, KV),
+                    Timestamp = couch_replicator_utils:iso8601(os:timestamp()),
                     lists:keystore(
                         <<"_replication_state_time">>, 1, Body1,
-                        {<<"_replication_state_time">>, timestamp()})
+                        {<<"_replication_state_time">>, Timestamp})
                 end;
             ({K, _V} = KV, Body) ->
                 lists:keystore(K, 1, Body, KV)
@@ -327,28 +332,6 @@ save_rep_doc(DbName, Doc) ->
     after
         couch_db:close(Db)
     end.
-
-
-% RFC3339 timestamps.
-% Note: doesn't include the time seconds fraction (RFC3339 says it's optional).
--spec timestamp() -> binary().
-timestamp() ->
-    {{Year, Month, Day}, {Hour, Min, Sec}} = calendar:now_to_local_time(os:timestamp()),
-    UTime = erlang:universaltime(),
-    LocalTime = calendar:universal_time_to_local_time(UTime),
-    DiffSecs = calendar:datetime_to_gregorian_seconds(LocalTime) -
-        calendar:datetime_to_gregorian_seconds(UTime),
-    zone(DiffSecs div 3600, (DiffSecs rem 3600) div 60),
-    iolist_to_binary(
-        io_lib:format("~4..0w-~2..0w-~2..0wT~2..0w:~2..0w:~2..0w~s",
-            [Year, Month, Day, Hour, Min, Sec,
-                zone(DiffSecs div 3600, (DiffSecs rem 3600) div 60)])).
-
--spec zone(integer(), integer()) -> iolist().
-zone(Hr, Min) when Hr >= 0, Min >= 0 ->
-    io_lib:format("+~2..0w:~2..0w", [Hr, Min]);
-zone(Hr, Min) ->
-    io_lib:format("-~2..0w:~2..0w", [abs(Hr), abs(Min)]).
 
 
 -spec rep_user_ctx({[_]}) -> #user_ctx{}.

@@ -21,7 +21,8 @@
     type = db :: atom() | '_',
     view = nil :: any() | '_',
     doc_id :: any() | '_',
-    db_name = null :: null | binary() | '_'
+    db_name = null :: null | binary() | '_',
+    start_time :: erlang:timestamp() | '_'
 }).
 
 -type rep_id() :: {string(), string()}.

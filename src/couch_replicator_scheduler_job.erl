@@ -494,8 +494,9 @@ doc_update_triggered(#rep{id = RepId, doc_id = DocId}) ->
 -spec doc_update_completed(#rep{}, list()) -> ok.
 doc_update_completed(#rep{db_name = null}, _Stats) ->
     ok;
-doc_update_completed(#rep{id = RepId, doc_id = DocId, db_name = DbName}, Stats) ->
-    couch_replicator_docs:update_doc_completed(DbName, DocId, Stats),
+doc_update_completed(#rep{id = RepId, doc_id = DocId, db_name = DbName,
+    start_time = StartTime}, Stats) ->
+    couch_replicator_docs:update_doc_completed(DbName, DocId, Stats, StartTime),
     couch_log:notice("Replication `~s` completed (triggered by `~s`)",
         [pp_rep_id(RepId), DocId]),
     ok.
@@ -538,7 +539,8 @@ init_state(Rep) ->
         id = {BaseId, _Ext},
         source = Src0, target = Tgt,
         options = Options, user_ctx = UserCtx,
-        type = Type, view = View
+        type = Type, view = View,
+        start_time = StartTime
     } = Rep,
     % Adjust minimum number of http source connections to 2 to avoid deadlock
     Src = adjust_maxconn(Src0, BaseId),
@@ -571,7 +573,7 @@ init_state(Rep) ->
         committed_seq = StartSeq,
         source_log = SourceLog,
         target_log = TargetLog,
-        rep_starttime = httpd_util:rfc1123_date(),
+        rep_starttime = StartTime,
         src_starttime = get_value(<<"instance_start_time">>, SourceInfo),
         tgt_starttime = get_value(<<"instance_start_time">>, TargetInfo),
         session_id = couch_uuids:random(),
@@ -673,7 +675,8 @@ do_checkpoint(State) ->
     {SrcInstanceStartTime, TgtInstanceStartTime} ->
         couch_log:notice("recording a checkpoint for `~s` -> `~s` at source update_seq ~p",
             [SourceName, TargetName, NewSeq]),
-        StartTime = ?l2b(ReplicationStartTime),
+        UniversalStartTime = calendar:now_to_universal_time(ReplicationStartTime),
+        StartTime = ?l2b(httpd_util:rfc1123_date(UniversalStartTime)),
         EndTime = ?l2b(httpd_util:rfc1123_date()),
         NewHistoryEntry = {[
             {<<"session_id">>, SessionId},

@@ -47,8 +47,9 @@
     {ok, {cancelled, binary()}} |
     {error, any()}.
 replicate(PostBody, Ctx) ->
-    {ok, #rep{id = RepId, options = Options, user_ctx = UserCtx} = Rep} =
-        couch_replicator_utils:parse_rep_doc(PostBody, Ctx),
+    {ok, Rep0} = couch_replicator_utils:parse_rep_doc(PostBody, Ctx),
+    Rep = Rep0#rep{start_time = os:timestamp()},
+    #rep{id = RepId, options = Options, user_ctx = UserCtx} = Rep,
     case get_value(cancel, Options, false) of
     true ->
         case get_value(id, Options, nil) of
@@ -207,7 +208,15 @@ handle_replicator_doc_query({row, Props}, {Db, Cb, UserAcc, States}) ->
     DocId = couch_util:get_value(id, Props),
     DocStateBin = couch_util:get_value(key, Props),
     DocState = erlang:binary_to_existing_atom(DocStateBin, utf8),
-    StateInfo = couch_util:get_value(value, Props),
+    MapValue = couch_util:get_value(value, Props),
+    {StartTime, StateTime, StateInfo} = case MapValue of
+        [StartT, StateT, Info] ->
+            {StartT, StateT, Info};
+        _Other ->
+            % Handle the case where the view code was upgraded but new view code
+            % wasn't updated yet (before a _scheduler/docs request was made)
+            {null, null, null}
+    end,
     % Set the error_count to 1 if failed. This is mainly for consistency as
     % jobs from doc_processor and scheduler will have that value set
     ErrorCount = case DocState of failed -> 1; _ -> 0 end,
@@ -219,7 +228,9 @@ handle_replicator_doc_query({row, Props}, {Db, Cb, UserAcc, States}) ->
                 {id, null},
                 {state, DocState},
                 {error_count, ErrorCount},
-                {info, StateInfo}
+                {info, StateInfo},
+                {last_updated, StateTime},
+                {start_time, StartTime}
             ]},
             {ok, {Db, Cb, Cb(EjsonInfo, UserAcc), States}};
         false ->
@@ -268,12 +279,16 @@ doc_from_db(RepDb, DocId, UserCtx) ->
     case fabric:open_doc(RepDb, DocId, [UserCtx, ejson_body]) of
         {ok, Doc} ->
             {Props} = couch_doc:to_json_obj(Doc, []),
-            State = couch_util:get_value(<<"_replication_state">>, Props, null),
+            State = get_value(<<"_replication_state">>, Props, null),
+            StartTime = get_value(<<"_replication_start_time">>, Props, null),
+            StateTime = get_value(<<"_replication_state_time">>, Props, null),
             {StateInfo, ErrorCount} = case State of
                 <<"completed">> ->
-                    {couch_util:get_value(<<"_replication_stats">>, Props, null), 0};
+                    Info = get_value(<<"_replication_stats">>, Props, null),
+                    {Info, 0};
                 <<"failed">> ->
-                    {couch_util:get_value(<<"_replication_state_reason">>, Props, null), 1};
+                    Info = get_value(<<"_replication_state_reason">>, Props, null),
+                    {Info, 1};
                 _OtherState ->
                     {null, 0}
             end,
@@ -283,7 +298,9 @@ doc_from_db(RepDb, DocId, UserCtx) ->
                 {id, null},
                 {state, State},
                 {error_count, ErrorCount},
-                {info, StateInfo}
+                {info, StateInfo},
+                {start_time, StartTime},
+                {last_updated, StateTime}
             ]}};
          {not_found, _Reason} ->
             {error, not_found}
