@@ -52,13 +52,20 @@ replicate(PostBody, Ctx) ->
     #rep{id = RepId, options = Options, user_ctx = UserCtx} = Rep,
     case get_value(cancel, Options, false) of
     true ->
-        case get_value(id, Options, nil) of
+        CancelRepId = case get_value(id, Options, nil) of
         nil ->
-            cancel_replication(RepId);
+            RepId;
         RepId2 ->
-            cancel_replication(RepId2, UserCtx)
+            RepId2
+        end,
+        case check_authorization(CancelRepId, UserCtx) of
+        ok ->
+            cancel_replication(CancelRepId);
+        not_found ->
+            {error, not_found}
         end;
     false ->
+        check_authorization(RepId, UserCtx),
         {ok, Listener} = rep_result_listener(RepId),
         Result = do_replication_loop(Rep),
         couch_replicator_notifier:stop(Listener),
@@ -129,25 +136,6 @@ cancel_replication({BasedId, Extension} = RepId) ->
         couch_log:notice("Replication '~s' not found", [FullRepId]),
         {error, not_found}
     end.
-
-
--spec cancel_replication(rep_id(), #user_ctx{}) ->
-    {ok, {cancelled, binary()}} | {error, not_found}.
-cancel_replication(RepId, #user_ctx{name = Name, roles = Roles}) ->
-    case lists:member(<<"_admin">>, Roles) of
-    true ->
-        cancel_replication(RepId);
-    false ->
-        case couch_replicator_scheduler:rep_state(RepId) of
-        #rep{user_ctx = #user_ctx{name = Name}} ->
-            cancel_replication(RepId);
-        #rep{user_ctx = #user_ctx{name = _Other}} ->
-            throw({unauthorized,
-                <<"Can't cancel a replication triggered by another user">>});
-        nil ->
-            {error, not_found}
-        end
-     end.
 
 
 -spec replication_states() -> [atom()].
@@ -305,3 +293,70 @@ doc_from_db(RepDb, DocId, UserCtx) ->
          {not_found, _Reason} ->
             {error, not_found}
     end.
+
+
+-spec check_authorization(rep_id(), #user_ctx{}) -> ok | not_found.
+check_authorization(RepId, #user_ctx{name = Name} = Ctx) ->
+    case couch_replicator_scheduler:rep_state(RepId) of
+    #rep{user_ctx = #user_ctx{name = Name}} ->
+        ok;
+    #rep{} ->
+        couch_httpd:verify_is_server_admin(Ctx);
+    nil ->
+        not_found
+    end.
+
+
+-ifdef(TEST).
+
+-include_lib("eunit/include/eunit.hrl").
+
+authorization_test_() ->
+    {
+        foreach,
+        fun () -> ok end,
+        fun (_) -> meck:unload() end,
+        [
+            t_admin_is_always_authorized(),
+            t_username_must_match(),
+            t_replication_not_found()
+        ]
+    }.
+
+
+t_admin_is_always_authorized() ->
+    ?_test(begin
+        expect_rep_user_ctx(<<"someuser">>, <<"_admin">>),
+        UserCtx = #user_ctx{name = <<"adm">>, roles = [<<"_admin">>]},
+        ?assertEqual(ok, check_authorization(<<"RepId">>, UserCtx))
+    end).
+
+
+t_username_must_match() ->
+     ?_test(begin
+        expect_rep_user_ctx(<<"user">>, <<"somerole">>),
+        UserCtx1 = #user_ctx{name = <<"user">>, roles = [<<"somerole">>]},
+        ?assertEqual(ok, check_authorization(<<"RepId">>, UserCtx1)),
+        UserCtx2 = #user_ctx{name = <<"other">>, roles = [<<"somerole">>]},
+        ?assertThrow({unauthorized, _}, check_authorization(<<"RepId">>, UserCtx2))
+    end).
+
+
+t_replication_not_found() ->
+     ?_test(begin
+        meck:expect(couch_replicator_scheduler, rep_state, 1, nil),
+        UserCtx1 = #user_ctx{name = <<"user">>, roles = [<<"somerole">>]},
+        ?assertEqual(not_found, check_authorization(<<"RepId">>, UserCtx1)),
+        UserCtx2 = #user_ctx{name = <<"adm">>, roles = [<<"_admin">>]},
+        ?assertEqual(not_found, check_authorization(<<"RepId">>, UserCtx2))
+    end).
+
+
+expect_rep_user_ctx(Name, Role) ->
+    meck:expect(couch_replicator_scheduler, rep_state,
+        fun(_Id) ->
+            UserCtx = #user_ctx{name = Name, roles = [Role]},
+            #rep{user_ctx = UserCtx}
+        end).
+
+-endif.
