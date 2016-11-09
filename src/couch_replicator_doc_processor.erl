@@ -217,7 +217,7 @@ code_change(_OldVsn, State, _Extra) ->
 % same document.
 -spec updated_doc(db_doc_id(), #rep{}, filter_type()) -> ok.
 updated_doc(Id, Rep, Filter) ->
-    case compare_replication_records(current_rep(Id), Rep) of
+    case normalize_rep(current_rep(Id)) == normalize_rep(Rep) of
         false ->
             removed_doc(Id),
             Row = #rdoc{
@@ -236,11 +236,6 @@ updated_doc(Id, Rep, Filter) ->
         true ->
             ok
     end.
-
-
--spec compare_replication_records(#rep{}, #rep{}) -> boolean().
-compare_replication_records(Rep1, Rep2) ->
-    normalize_rep(Rep1) == normalize_rep(Rep2).
 
 
 % Return current #rep{} record if any. If replication hasn't been submitted
