@@ -15,6 +15,7 @@
 
 -export([start_link/0]).
 -export([docs/1, doc/2]).
+-export([compat_mode/0]).
 
 % multidb changes callback
 -export([db_created/2, db_deleted/2, db_found/2, db_change/3]).
@@ -31,6 +32,7 @@
     get_json_value/3
 ]).
 
+-define(DEFAULT_COMPATIBILITY, false).
 -define(ERROR_MAX_BACKOFF_EXPONENT, 12).  % ~ 1 day on average
 -define(TS_DAY_SEC, 86400).
 
@@ -104,14 +106,14 @@ process_change(DbName, {Change}) ->
         undefined ->
             ok = process_updated(Id, JsonRepDoc);
         <<"triggered">> ->
-            couch_replicator_docs:remove_state_fields(DbName, DocId),
+            maybe_remove_state_fields(DbName, DocId),
             ok = process_updated(Id, JsonRepDoc);
         <<"completed">> ->
             ok = gen_server:call(?MODULE, {completed, Id}, infinity);
         <<"error">> ->
             % Handle replications started from older versions of replicator
             % which wrote transient errors to replication docs
-            couch_replicator_docs:remove_state_fields(DbName, DocId),
+            maybe_remove_state_fields(DbName, DocId),
             ok = process_updated(Id, JsonRepDoc);
         <<"failed">> ->
             ok
@@ -120,6 +122,15 @@ process_change(DbName, {Change}) ->
         ok
     end,
     ok.
+
+
+maybe_remove_state_fields(DbName, DocId) ->
+    case compat_mode() of
+        true ->
+            ok;
+        false ->
+            couch_replicator_docs:remove_state_fields(DbName, DocId)
+    end.
 
 
 process_updated({DbName, _DocId} = Id, JsonRepDoc) ->
@@ -206,21 +217,68 @@ code_change(_OldVsn, State, _Extra) ->
 % same document.
 -spec updated_doc(db_doc_id(), #rep{}, filter_type()) -> ok.
 updated_doc(Id, Rep, Filter) ->
-    removed_doc(Id),
-    Row = #rdoc{
-        id = Id,
-        state = initializing,
-        rep = Rep,
-        rid = nil,
-        filter = Filter,
-        info = nil,
-        errcnt = 0,
-        worker = nil,
-        last_updated = os:timestamp()
-    },
-    true = ets:insert(?MODULE, Row),
-    ok = maybe_start_worker(Id),
-    ok.
+    case compare_replication_records(current_rep(Id), Rep) of
+        false ->
+            removed_doc(Id),
+            Row = #rdoc{
+                id = Id,
+                state = initializing,
+                rep = Rep,
+                rid = nil,
+                filter = Filter,
+                info = nil,
+                errcnt = 0,
+                worker = nil,
+                last_updated = os:timestamp()
+            },
+            true = ets:insert(?MODULE, Row),
+            ok = maybe_start_worker(Id);
+        true ->
+            ok
+    end.
+
+
+-spec compare_replication_records(#rep{}, #rep{}) -> boolean().
+compare_replication_records(Rep1, Rep2) ->
+    normalize_rep(Rep1) == normalize_rep(Rep2).
+
+
+% Return current #rep{} record if any. If replication hasn't been submitted
+% to the scheduler yet, #rep{} record will be in the document processor's
+% ETS table, otherwise query scheduler for the #rep{} record.
+-spec current_rep({binary(), binary()}) -> #rep{} | nil.
+current_rep({DbName, DocId}) when is_binary(DbName), is_binary(DocId) ->
+    case ets:lookup(?MODULE, {DbName, DocId}) of
+        [] ->
+            nil;
+        [#rdoc{state = scheduled, rep = nil, rid = JobId}] ->
+            % When replication is scheduled, #rep{} record which can be quite
+            % large compared to other bits in #rdoc is removed in order to avoid
+            % having to keep 2 copies of it. So have to fetch it from the
+            % scheduler.
+            couch_replicator_scheduler:rep_state(JobId);
+        [#rdoc{rep = Rep}] ->
+            Rep
+    end.
+
+
+% Normalize a #rep{} record such that it doesn't contain time dependent fields
+% pids (like httpc pools), and options / props are sorted. This function would
+% used during comparisons.
+-spec normalize_rep(#rep{} | nil) -> #rep{} | nil.
+normalize_rep(nil) ->
+    nil;
+
+normalize_rep(#rep{} = Rep)->
+    #rep{
+       source = couch_replicator_api_wrap:normalize_db(Rep#rep.source),
+       target = couch_replicator_api_wrap:normalize_db(Rep#rep.target),
+       options = Rep#rep.options,  % already sorted in make_options/1
+       type = Rep#rep.type,
+       view = Rep#rep.view,
+       doc_id = Rep#rep.doc_id,
+       db_name = Rep#rep.db_name
+    }.
 
 
 -spec worker_returned(reference(), db_doc_id(), rep_start_result()) -> ok.
@@ -255,6 +313,7 @@ worker_returned(Ref, Id, {ok, RepId}) ->
                 Row0#rdoc{rep=nil, rid=RepId, info=nil}
         end,
         true = ets:insert(?MODULE, NewRow),
+        ok = maybe_update_doc_triggered(Row#rdoc.rep, RepId),
         ok = maybe_start_worker(Id);
     _ ->
         ok  % doc could have been deleted, ignore
@@ -273,6 +332,7 @@ worker_returned(Ref, Id, {temporary_error, Reason}) ->
             last_updated = os:timestamp()
         },
         true = ets:insert(?MODULE, NewRow),
+        ok = maybe_update_doc_error(NewRow#rdoc.rep, Reason),
         ok = maybe_start_worker(Id);
     _ ->
         ok  % doc could have been deleted, ignore
@@ -287,6 +347,24 @@ worker_returned(Ref, Id, {permanent_failure, _Reason}) ->
         ok  % doc could have been deleted, ignore
     end,
     ok.
+
+-spec maybe_update_doc_error(#rep{}, any()) -> ok.
+maybe_update_doc_error(Rep, Reason) ->
+    case compat_mode() of
+        true ->
+            couch_replicator_docs:update_error(Rep, Reason);
+        false ->
+            ok
+    end.
+
+-spec maybe_update_doc_triggered(#rep{}, rep_id()) -> ok.
+maybe_update_doc_triggered(Rep, RepId) ->
+    case compat_mode() of
+        true ->
+            couch_replicator_docs:update_triggered(Rep, RepId);
+        false ->
+            ok
+    end.
 
 
 -spec error_backoff(non_neg_integer()) -> seconds().
@@ -346,6 +424,10 @@ get_worker_wait(#rdoc{state = error, errcnt = ErrCnt}) ->
 
 get_worker_wait(#rdoc{state = initializing}) ->
     0.
+
+-spec compat_mode() -> boolean().
+compat_mode() ->
+    config:get_boolean("replicator", "compatibility_mode", ?DEFAULT_COMPATIBILITY).
 
 
 % _scheduler/docs HTTP endpoint helpers
@@ -630,6 +712,33 @@ t_ejson_docs() ->
     end).
 
 
+normalize_rep_test_() ->
+    {
+        setup,
+        fun() -> meck:expect(config, get, fun(_, _, Default) -> Default end) end,
+        fun(_) -> meck:unload() end,
+        ?_test(begin
+            EJson1 = {[
+                {<<"source">>, <<"http://host.com/source_db">>},
+                {<<"target">>, <<"local">>},
+                {<<"doc_ids">>, [<<"a">>, <<"c">>, <<"b">>]},
+                {<<"other_field">>, <<"some_value">>}
+            ]},
+            Rep1 = couch_replicator_docs:parse_rep_doc_without_id(EJson1),
+            EJson2 = {[
+                {<<"other_field">>, <<"unrelated">>},
+                {<<"target">>, <<"local">>},
+                {<<"source">>, <<"http://host.com/source_db">>},
+                {<<"doc_ids">>, [<<"c">>, <<"a">>, <<"b">>]},
+                {<<"other_field2">>, <<"unrelated2">>}
+            ]},
+            Rep2 = couch_replicator_docs:parse_rep_doc_without_id(EJson2),
+            ?assertEqual(normalize_rep(Rep1), normalize_rep(Rep2))
+        end)
+    }.
+
+
+
 % Test helper functions
 
 
@@ -639,6 +748,7 @@ setup() ->
     meck:expect(couch_log, warning, 2, ok),
     meck:expect(couch_log, error, 2, ok),
     meck:expect(config, get, fun(_, _, Default) -> Default end),
+    meck:expect(config, listen_for_changes, 2, ok),
     meck:expect(couch_replicator_clustering, owner, 2, node()),
     meck:expect(couch_replicator_doc_processor_worker, spawn_worker, 3, wref),
     meck:expect(couch_replicator_scheduler, remove_job, 1, ok),

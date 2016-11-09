@@ -486,7 +486,13 @@ format_status(_Opt, [_PDict, State]) ->
 -spec doc_update_triggered(#rep{}) -> ok.
 doc_update_triggered(#rep{db_name = null}) ->
     ok;
-doc_update_triggered(#rep{id = RepId, doc_id = DocId}) ->
+doc_update_triggered(#rep{id = RepId, doc_id = DocId} = Rep) ->
+    case couch_replicator_doc_processor:compat_mode() of
+        true ->
+            couch_replicator_docs:update_triggered(Rep, RepId);
+        false ->
+            ok
+    end,
     couch_log:notice("Document `~s` triggered replication `~s`",
         [DocId, pp_rep_id(RepId)]),
     ok.
