@@ -996,13 +996,13 @@ header_value(Key, Headers, Default) ->
 % comparisons. This means remove things like pids and also sort options / props.
 normalize_db(#httpdb{} = HttpDb) ->
     #httpdb{
-       url = HttpDb#httpdb.url,
-       oauth = HttpDb#httpdb.oauth,
-       headers = lists:keysort(1, HttpDb#httpdb.headers),
-       timeout = HttpDb#httpdb.timeout,
-       ibrowse_options = lists:keysort(1, HttpDb#httpdb.ibrowse_options),
-       retries = HttpDb#httpdb.retries,
-       http_connections = HttpDb#httpdb.http_connections
+        url = HttpDb#httpdb.url,
+        oauth = HttpDb#httpdb.oauth,
+        headers = lists:keysort(1, HttpDb#httpdb.headers),
+        timeout = HttpDb#httpdb.timeout,
+        ibrowse_options = lists:keysort(1, HttpDb#httpdb.ibrowse_options),
+        retries = HttpDb#httpdb.retries,
+        http_connections = HttpDb#httpdb.http_connections
     };
 
 normalize_db(<<DbName/binary>>) ->
@@ -1016,13 +1016,13 @@ normalize_db(<<DbName/binary>>) ->
 
 normalize_http_db_test() ->
     HttpDb =  #httpdb{
-       url = "http://host/db",
-       oauth = #oauth{},
-       headers = [{"k2","v2"}, {"k1","v1"}],
-       timeout = 30000,
-       ibrowse_options = [{k2, v2}, {k1, v1}],
-       retries = 10,
-       http_connections = 20
+        url = "http://host/db",
+        oauth = #oauth{},
+        headers = [{"k2","v2"}, {"k1","v1"}],
+        timeout = 30000,
+        ibrowse_options = [{k2, v2}, {k1, v1}],
+        retries = 10,
+        http_connections = 20
     },
     Expected = HttpDb#httpdb{
         headers = [{"k1","v1"}, {"k2","v2"}],

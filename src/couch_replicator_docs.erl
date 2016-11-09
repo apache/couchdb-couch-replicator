@@ -96,11 +96,11 @@ update_triggered(Rep, {Base, Ext}) ->
     } = Rep,
     StartTimeBin = couch_replicator_utils:iso8601(StartTime),
     update_rep_doc(DbName, DocId, [
-            {<<"_replication_state">>, <<"triggered">>},
-            {<<"_replication_state_reason">>, undefined},
-            {<<"_replication_id">>, iolist_to_binary([Base, Ext])},
-            {<<"_replication_start_time">>, StartTimeBin},
-            {<<"_replication_stats">>, undefined}]),
+        {<<"_replication_state">>, <<"triggered">>},
+        {<<"_replication_state_reason">>, undefined},
+        {<<"_replication_id">>, iolist_to_binary([Base, Ext])},
+        {<<"_replication_start_time">>, StartTimeBin},
+        {<<"_replication_stats">>, undefined}]),
     ok.
 
 
@@ -114,10 +114,10 @@ update_error(#rep{db_name = DbName, doc_id = DocId, id = RepId}, Error) ->
             null
     end,
     update_rep_doc(DbName, DocId, [
-            {<<"_replication_state">>, <<"error">>},
-            {<<"_replication_state_reason">>, Reason},
-            {<<"_replication_stats">>, undefined},
-            {<<"_replication_id">>, BinRepId}]),
+        {<<"_replication_state">>, <<"error">>},
+        {<<"_replication_state_reason">>, Reason},
+        {<<"_replication_stats">>, undefined},
+        {<<"_replication_id">>, BinRepId}]),
     ok.
 
 

@@ -266,13 +266,13 @@ normalize_rep(nil) ->
 
 normalize_rep(#rep{} = Rep)->
     #rep{
-       source = couch_replicator_api_wrap:normalize_db(Rep#rep.source),
-       target = couch_replicator_api_wrap:normalize_db(Rep#rep.target),
-       options = Rep#rep.options,  % already sorted in make_options/1
-       type = Rep#rep.type,
-       view = Rep#rep.view,
-       doc_id = Rep#rep.doc_id,
-       db_name = Rep#rep.db_name
+        source = couch_replicator_api_wrap:normalize_db(Rep#rep.source),
+        target = couch_replicator_api_wrap:normalize_db(Rep#rep.target),
+        options = Rep#rep.options,  % already sorted in make_options/1
+        type = Rep#rep.type,
+        view = Rep#rep.view,
+        doc_id = Rep#rep.doc_id,
+        db_name = Rep#rep.db_name
     }.
 
 
