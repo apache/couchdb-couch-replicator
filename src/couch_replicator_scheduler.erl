@@ -309,6 +309,12 @@ handle_crashed_job(#job{rep = #rep{db_name = null}} = Job, Reason, _State) ->
 
 handle_crashed_job(Job, Reason, State) ->
     ok = update_state_crashed(Job, Reason, State),
+    case couch_replicator_doc_processor:compat_mode() of
+        true ->
+            couch_replicator_docs:update_error(Job#job.rep, Reason);
+        false ->
+            ok
+    end,
     case ets:info(?MODULE, size) < State#state.max_jobs of
         true ->
             % Starting pending jobs is an O(TotalJobsCount) operation. Only do

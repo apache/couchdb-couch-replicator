@@ -23,6 +23,8 @@
     update_failed/4,
     update_rep_id/1
 ]).
+-export([update_triggered/2, update_error/2]).
+
 
 -define(REP_DB_NAME, <<"_replicator">>).
 -define(REP_DESIGN_DOC, <<"_design/_replicator">>).
@@ -57,6 +59,8 @@ remove_state_fields(DbName, DocId) ->
         {<<"_replication_state">>, undefined},
         {<<"_replication_state_time">>, undefined},
         {<<"_replication_state_reason">>, undefined},
+        {<<"_replication_start_time">>, undefined},
+        {<<"_replication_id">>, undefined},
         {<<"_replication_stats">>, undefined}]).
 
 -spec update_doc_completed(binary(), binary(), [_], erlang:timestamp()) -> any().
@@ -72,19 +76,49 @@ update_doc_completed(DbName, DocId, Stats, StartTime) ->
 
 -spec update_failed(binary(), binary(), any(), erlang:timestamp()) -> any().
 update_failed(DbName, DocId, Error, StartTime) ->
-    Reason = case Error of
-        {bad_rep_doc, Reas} ->
-            Reas;
-        _ ->
-            to_binary(Error)
-    end,
+    Reason = error_reason(Error),
     couch_log:error("Error processing replication doc `~s`: ~s", [DocId, Reason]),
     StartTimeBin = couch_replicator_utils:iso8601(StartTime),
     update_rep_doc(DbName, DocId, [
         {<<"_replication_state">>, <<"failed">>},
         {<<"_replication_start_time">>, StartTimeBin},
+        {<<"_replication_stats">>, undefined},
         {<<"_replication_state_reason">>, Reason}]),
-   couch_stats:increment_counter([couch_replicator, docs, failed_state_updates]).
+    couch_stats:increment_counter([couch_replicator, docs, failed_state_updates]).
+
+
+-spec update_triggered(#rep{}, rep_id()) -> ok.
+update_triggered(Rep, {Base, Ext}) ->
+    #rep{
+        db_name = DbName,
+        doc_id = DocId,
+        start_time = StartTime
+    } = Rep,
+    StartTimeBin = couch_replicator_utils:iso8601(StartTime),
+    update_rep_doc(DbName, DocId, [
+        {<<"_replication_state">>, <<"triggered">>},
+        {<<"_replication_state_reason">>, undefined},
+        {<<"_replication_id">>, iolist_to_binary([Base, Ext])},
+        {<<"_replication_start_time">>, StartTimeBin},
+        {<<"_replication_stats">>, undefined}]),
+    ok.
+
+
+-spec update_error(#rep{}, any()) -> ok.
+update_error(#rep{db_name = DbName, doc_id = DocId, id = RepId}, Error) ->
+    Reason = error_reason(Error),
+    BinRepId = case RepId of
+        {Base, Ext} ->
+            iolist_to_binary([Base, Ext]);
+        _Other ->
+            null
+    end,
+    update_rep_doc(DbName, DocId, [
+        {<<"_replication_state">>, <<"error">>},
+        {<<"_replication_state_reason">>, Reason},
+        {<<"_replication_stats">>, undefined},
+        {<<"_replication_id">>, BinRepId}]),
+    ok.
 
 
 -spec ensure_rep_db_exists() -> {ok, #db{}}.
@@ -458,7 +492,7 @@ convert_options([{<<"doc_ids">>, V} | _R]) when not is_list(V) ->
 convert_options([{<<"doc_ids">>, V} | R]) ->
     % Ensure same behaviour as old replicator: accept a list of percent
     % encoded doc IDs.
-    DocIds = [?l2b(couch_httpd:unquote(Id)) || Id <- V],
+    DocIds = lists:usort([?l2b(couch_httpd:unquote(Id)) || Id <- V]),
     [{doc_ids, DocIds} | convert_options(R)];
 convert_options([{<<"selector">>, V} | _R]) when not is_tuple(V) ->
     throw({bad_request, <<"parameter `selector` must be a JSON object">>});
@@ -624,6 +658,19 @@ strip_credentials(Url) when is_binary(Url) ->
         [{return, binary}]);
 strip_credentials({Props}) ->
     {lists:keydelete(<<"oauth">>, 1, Props)}.
+
+
+error_reason({shutdown, Error}) ->
+    error_reason(Error);
+error_reason({bad_rep_doc, Reason}) ->
+    to_binary(Reason);
+error_reason({error, {Error, Reason}})
+  when is_atom(Error), is_binary(Reason) ->
+    to_binary(io_lib:format("~s: ~s", [Error, Reason]));
+error_reason({error, Reason}) ->
+    to_binary(Reason);
+error_reason(Reason) ->
+    to_binary(Reason).
 
 
 
