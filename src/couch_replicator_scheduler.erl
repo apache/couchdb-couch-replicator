@@ -119,6 +119,12 @@ job_summary(JobId, HealthThreshold) ->
                 {Pid, ErrorCount} when is_pid(Pid) ->
                      {running, null}
             end,
+            StrippedProxyURL = case (Rep#rep.source)#httpdb.proxy_url of
+                undefined ->
+                    null;
+                ProxyURL when is_list(ProxyURL) ->
+                    list_to_binary(couch_util:url_strip_password(ProxyURL))
+            end,
             [
                 {source, iolist_to_binary(ejson_url(Rep#rep.source))},
                 {target, iolist_to_binary(ejson_url(Rep#rep.target))},
@@ -126,7 +132,8 @@ job_summary(JobId, HealthThreshold) ->
                 {info, Info},
                 {error_count, ErrorCount},
                 {last_updated, last_updated(History)},
-                {start_time, couch_replicator_utils:iso8601(Rep#rep.start_time)}
+                {start_time, couch_replicator_utils:iso8601(Rep#rep.start_time)},
+                {proxy, StrippedProxyURL}
             ];
         {error, not_found} ->
             nil  % Job might have just completed
