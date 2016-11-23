@@ -55,6 +55,9 @@ init([]) ->
     {ok, #state{close_interval=Interval, timer=Timer}}.
 
 
+acquire(URL) when is_binary(URL) ->
+    acquire(binary_to_list(URL));
+
 acquire(URL) ->
     case gen_server:call(?MODULE, {acquire, URL}) of
         {ok, Worker} ->
@@ -85,7 +88,9 @@ handle_call({acquire, URL}, From, State) ->
                     couch_stats:increment_counter([couch_replicator, connection, acquires]),
                     ets:insert(?MODULE, Worker#connection{mref=monitor(process, Pid)}),
                     {reply, {ok, Worker#connection.worker}, State}
-            end
+            end;
+        {error, invalid_uri} ->
+            {reply, {error, invalid_uri}, State}
     end;
 
 handle_call({create, URL, Worker}, From, State) ->

@@ -259,17 +259,15 @@ parse_rep_doc(Doc, UserCtx) ->
 
 -spec parse_rep_doc_without_id({[_]}, #user_ctx{}) -> {ok, #rep{}}.
 parse_rep_doc_without_id({Props}, UserCtx) ->
-    ProxyParams = parse_proxy_params(get_value(<<"proxy">>, Props, <<>>)),
+    Proxy = get_value(<<"proxy">>, Props, <<>>),
     Opts = make_options(Props),
     case get_value(cancel, Opts, false) andalso
         (get_value(id, Opts, nil) =/= nil) of
     true ->
         {ok, #rep{options = Opts, user_ctx = UserCtx}};
     false ->
-        Source = parse_rep_db(get_value(<<"source">>, Props),
-                              ProxyParams, Opts),
-        Target = parse_rep_db(get_value(<<"target">>, Props),
-                              ProxyParams, Opts),
+        Source = parse_rep_db(get_value(<<"source">>, Props), Proxy, Opts),
+        Target = parse_rep_db(get_value(<<"target">>, Props), Proxy, Opts),
         {Type, View} = case couch_replicator_filters:view_type(Props, Opts) of
         {error, Error} ->
             throw({bad_request, Error});
@@ -380,8 +378,13 @@ rep_user_ctx({RepDoc}) ->
         }
     end.
 
--spec parse_rep_db({[_]} | binary(), [_], [_]) -> #httpd{} | binary().
-parse_rep_db({Props}, ProxyParams, Options) ->
+-spec parse_rep_db({[_]} | binary(), binary(), [_]) -> #httpd{} | binary().
+parse_rep_db({Props}, Proxy, Options) ->
+    ProxyParams = parse_proxy_params(Proxy),
+    ProxyURL = case ProxyParams of
+        [] -> undefined;
+        _ -> binary_to_list(Proxy)
+    end,
     Url = maybe_add_trailing_slash(get_value(<<"url">>, Props)),
     {AuthProps} = get_value(<<"auth">>, Props, {[]}),
     {BinHeaders} = get_value(<<"headers">>, Props, {[]}),
@@ -414,15 +417,16 @@ parse_rep_db({Props}, ProxyParams, Options) ->
                 ProxyParams ++ ssl_params(Url)]),
         timeout = get_value(connection_timeout, Options),
         http_connections = get_value(http_connections, Options),
-        retries = get_value(retries, Options)
+        retries = get_value(retries, Options),
+        proxy_url = ProxyURL
     };
-parse_rep_db(<<"http://", _/binary>> = Url, ProxyParams, Options) ->
-    parse_rep_db({[{<<"url">>, Url}]}, ProxyParams, Options);
-parse_rep_db(<<"https://", _/binary>> = Url, ProxyParams, Options) ->
-    parse_rep_db({[{<<"url">>, Url}]}, ProxyParams, Options);
-parse_rep_db(<<DbName/binary>>, _ProxyParams, _Options) ->
+parse_rep_db(<<"http://", _/binary>> = Url, Proxy, Options) ->
+    parse_rep_db({[{<<"url">>, Url}]}, Proxy, Options);
+parse_rep_db(<<"https://", _/binary>> = Url, Proxy, Options) ->
+    parse_rep_db({[{<<"url">>, Url}]}, Proxy, Options);
+parse_rep_db(<<DbName/binary>>, _Proxy, _Options) ->
     DbName;
-parse_rep_db(undefined, _ProxyParams, _Options) ->
+parse_rep_db(undefined, _Proxy, _Options) ->
     throw({error, <<"Missing replicator database">>}).
 
 
