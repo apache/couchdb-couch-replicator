@@ -15,7 +15,7 @@
 
 -export([start_link/0]).
 -export([docs/1, doc/2]).
--export([compat_mode/0]).
+-export([update_docs/0]).
 
 % multidb changes callback
 -export([db_created/2, db_deleted/2, db_found/2, db_change/3]).
@@ -32,7 +32,7 @@
     get_json_value/3
 ]).
 
--define(DEFAULT_COMPATIBILITY, false).
+-define(DEFAULT_UPDATE_DOCS, false).
 -define(ERROR_MAX_BACKOFF_EXPONENT, 12).  % ~ 1 day on average
 -define(TS_DAY_SEC, 86400).
 
@@ -125,7 +125,7 @@ process_change(DbName, {Change}) ->
 
 
 maybe_remove_state_fields(DbName, DocId) ->
-    case compat_mode() of
+    case update_docs() of
         true ->
             ok;
         false ->
@@ -345,7 +345,7 @@ worker_returned(Ref, Id, {permanent_failure, _Reason}) ->
 
 -spec maybe_update_doc_error(#rep{}, any()) -> ok.
 maybe_update_doc_error(Rep, Reason) ->
-    case compat_mode() of
+    case update_docs() of
         true ->
             couch_replicator_docs:update_error(Rep, Reason);
         false ->
@@ -354,7 +354,7 @@ maybe_update_doc_error(Rep, Reason) ->
 
 -spec maybe_update_doc_triggered(#rep{}, rep_id()) -> ok.
 maybe_update_doc_triggered(Rep, RepId) ->
-    case compat_mode() of
+    case update_docs() of
         true ->
             couch_replicator_docs:update_triggered(Rep, RepId);
         false ->
@@ -420,9 +420,9 @@ get_worker_wait(#rdoc{state = error, errcnt = ErrCnt}) ->
 get_worker_wait(#rdoc{state = initializing}) ->
     0.
 
--spec compat_mode() -> boolean().
-compat_mode() ->
-    config:get_boolean("replicator", "compatibility_mode", ?DEFAULT_COMPATIBILITY).
+-spec update_docs() -> boolean().
+update_docs() ->
+    config:get_boolean("replicator", "update_docs", ?DEFAULT_UPDATE_DOCS).
 
 
 % _scheduler/docs HTTP endpoint helpers
