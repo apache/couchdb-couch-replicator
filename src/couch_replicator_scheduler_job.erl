@@ -487,7 +487,7 @@ format_status(_Opt, [_PDict, State]) ->
 doc_update_triggered(#rep{db_name = null}) ->
     ok;
 doc_update_triggered(#rep{id = RepId, doc_id = DocId} = Rep) ->
-    case couch_replicator_doc_processor:compat_mode() of
+    case couch_replicator_doc_processor:update_docs() of
         true ->
             couch_replicator_docs:update_triggered(Rep, RepId);
         false ->
