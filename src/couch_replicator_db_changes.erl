@@ -32,7 +32,7 @@ start_link() ->
 
 
 init([]) ->
-    EvtPid = start_link_cluster_event_listener(),
+    EvtPid = couch_replicator_clustering:link_cluster_event_listener(self()),
     State = #state{event_listener = EvtPid, mdb_changes = nil},
     case couch_replicator_clustering:is_stable() of
         true ->
@@ -88,14 +88,3 @@ stop_mdb_changes(#state{mdb_changes = Pid} = State) ->
     unlink(Pid),
     exit(Pid, kill),
     State#state{mdb_changes = nil}.
-
-
--spec start_link_cluster_event_listener() -> pid().
-start_link_cluster_event_listener() ->
-    Server = self(),
-    CallbackFun =
-        fun(Event = {cluster, _}) -> gen_server:cast(Server, Event);
-           (_) -> ok
-        end,
-    {ok, Pid} = couch_replicator_notifier:start_link(CallbackFun),
-    Pid.
