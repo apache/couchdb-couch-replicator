@@ -74,7 +74,7 @@ start_link() ->
     gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
 
--spec add_job(#rep{}) -> ok | {error, already_added}.
+-spec add_job(#rep{}) -> ok.
 add_job(#rep{} = Rep) when Rep#rep.id /= undefined ->
     Job = #job{
         id = Rep#rep.id,
