@@ -310,7 +310,7 @@ worker_returned(Ref, Id, {ok, RepId}) ->
                 % for future changes.
                 ok = couch_replicator_scheduler:remove_job(OldRepId),
                 Msg = io_lib:format("Replication id changed: ~p -> ~p", [OldRepId, RepId]),
-                Row0#rdoc{info = couch_util:to_binary(Msg)};
+                Row0#rdoc{rid = RepId, info = couch_util:to_binary(Msg)};
             #rdoc{rid = nil} ->
                 % Calculated new replication id for non-filtered replication. Remove
                 % replication doc body, after this we won't needed any more.
