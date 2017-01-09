@@ -30,6 +30,7 @@
 
 % public API
 -export([start_link/0, owner/2, is_stable/0]).
+-export([link_cluster_event_listener/1]).
 
 % gen_server callbacks
 -export([init/1, handle_call/3, handle_info/2, handle_cast/2,
@@ -60,14 +61,10 @@ start_link() ->
 
 
 % owner/2 function computes ownership for a {DbName, DocId} tuple
-% Returns `no_owner` in case no DocId is null, `unstable` if cluster
-% is considered to be unstable i.e. it has changed recently, or returns
-% node() which is considered to be the owner.
+% `unstable` if cluster is considered to be unstable i.e. it has changed
+% recently, or returns node() which of the owner.
 %
--spec owner(Dbname :: binary(), DocId :: binary() | null) ->
-    node() | no_owner | unstable.
-owner(_DbName, null) ->
-    no_owner;
+-spec owner(Dbname :: binary(), DocId :: binary()) -> node() | unstable.
 owner(<<"shards/", _/binary>> = DbName, DocId) ->
     case is_stable() of
         false ->
@@ -82,6 +79,18 @@ owner(_DbName, _DocId) ->
 -spec is_stable() -> true | false.
 is_stable() ->
     gen_server:call(?MODULE, is_stable).
+
+
+% Convenience function for gen_servers to subscribe to {cluster, stable} and
+% {cluster, unstable} events from couch_replicator clustering module.
+-spec link_cluster_event_listener(pid()) -> pid().
+link_cluster_event_listener(GenServer) when is_pid(GenServer) ->
+    CallbackFun =
+        fun(Event = {cluster, _}) -> gen_server:cast(GenServer, Event);
+           (_) -> ok
+        end,
+    {ok, Pid} = couch_replicator_notifier:start_link(CallbackFun),
+    Pid.
 
 
 % gen_server callbacks

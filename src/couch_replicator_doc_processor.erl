@@ -166,6 +166,7 @@ start_link() ->
 
 init([]) ->
     ?MODULE = ets:new(?MODULE, [ordered_set, named_table, {keypos, #rdoc.id}]),
+    couch_replicator_clustering:link_cluster_event_listener(self()),
     {ok, nil}.
 
 
@@ -189,6 +190,14 @@ handle_call({clean_up_replications, DbName}, _From, State) ->
     ok = removed_db(DbName),
     {reply, ok, State}.
 
+handle_cast({cluster, unstable}, State) ->
+    % Ignoring unstable state transition
+    {noreply, State};
+
+handle_cast({cluster, stable}, State) ->
+    % Membership changed recheck all the replication document ownership
+    nil = ets:foldl(fun cluster_membership_foldl/2, nil, ?MODULE),
+    {noreply, State};
 
 handle_cast(Msg, State) ->
     {stop, {error, unexpected_message, Msg}, State}.
@@ -530,6 +539,21 @@ ejson_doc_state_filter(State, States) when is_list(States), is_atom(State) ->
     lists:member(State, States).
 
 
+-spec cluster_membership_foldl(#rdoc{}, nil) -> nil.
+cluster_membership_foldl(#rdoc{id = {DbName, DocId} = Id, rid = RepId}, nil) ->
+    case couch_replicator_clustering:owner(DbName, DocId) of
+        unstable ->
+            nil;
+        ThisNode when ThisNode =:= node() ->
+            nil;
+        OtherNode ->
+            Msg = "Replication doc ~p:~p with id ~p usurped by node ~p",
+            couch_log:notice(Msg, [DbName, DocId, RepId, OtherNode]),
+            removed_doc(Id),
+            nil
+    end.
+
+
 -ifdef(TEST).
 
 -include_lib("eunit/include/eunit.hrl").
@@ -558,7 +582,8 @@ doc_processor_test_() ->
             t_failed_change(),
             t_change_for_different_node(),
             t_change_when_cluster_unstable(),
-            t_ejson_docs()
+            t_ejson_docs(),
+            t_cluster_membership_foldl()
         ]
     }.
 
@@ -707,6 +732,21 @@ t_ejson_docs() ->
     end).
 
 
+% Check that when cluster membership changes records from doc processor and job
+% scheduler get removed
+t_cluster_membership_foldl() ->
+   ?_test(begin
+        mock_existing_jobs_lookup([test_rep(?R1)]),
+        ?assertEqual(ok, process_change(?DB, change())),
+        meck:expect(couch_replicator_clustering, owner, 2, different_node),
+        ?assert(ets:member(?MODULE, {?DB, ?DOC1})),
+        gen_server:cast(?MODULE, {cluster, stable}),
+        timer:sleep(100),
+        ?assertNot(ets:member(?MODULE, {?DB, ?DOC1})),
+        ?assert(removed_job(?R1))
+   end).
+
+
 normalize_rep_test_() ->
     {
         setup,
@@ -745,6 +785,7 @@ setup() ->
     meck:expect(config, get, fun(_, _, Default) -> Default end),
     meck:expect(config, listen_for_changes, 2, ok),
     meck:expect(couch_replicator_clustering, owner, 2, node()),
+    meck:expect(couch_replicator_clustering, link_cluster_event_listener, 1, ok),
     meck:expect(couch_replicator_doc_processor_worker, spawn_worker, 3, wref),
     meck:expect(couch_replicator_scheduler, remove_job, 1, ok),
     meck:expect(couch_replicator_docs, remove_state_fields, 2, ok),

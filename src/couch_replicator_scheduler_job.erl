@@ -349,21 +349,13 @@ handle_cast({db_compacted, DbName},
     {noreply, State#rep_state{target = NewTarget}};
 
 handle_cast(checkpoint, State) ->
-    #rep_state{rep_details = #rep{db_name = DbName, doc_id = DocId} = Rep} = State,
-    case couch_replicator_clustering:owner(DbName, DocId) of
-    Owner when Owner =:= node(); Owner =:= no_owner; Owner =:= unstable ->
-        case do_checkpoint(State) of
-        {ok, NewState} ->
-            couch_stats:increment_counter([couch_replicator, checkpoints, success]),
-            {noreply, NewState#rep_state{timer = start_timer(State)}};
-        Error ->
-            couch_stats:increment_counter([couch_replicator, checkpoints, failure]),
-            {stop, Error, State}
-        end;
-    Other when Other =/= node() ->
-        couch_log:notice("Replication `~s` usurped by ~s (triggered by `~s`)",
-            [pp_rep_id(Rep#rep.id), Other, DocId]),
-        {stop, shutdown, State}
+    case do_checkpoint(State) of
+    {ok, NewState} ->
+        couch_stats:increment_counter([couch_replicator, checkpoints, success]),
+        {noreply, NewState#rep_state{timer = start_timer(State)}};
+    Error ->
+        couch_stats:increment_counter([couch_replicator, checkpoints, failure]),
+        {stop, Error, State}
     end;
 
 handle_cast({report_seq, Seq},
