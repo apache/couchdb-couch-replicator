@@ -30,11 +30,13 @@
 -type seconds() :: non_neg_integer().
 -type rep_start_result() ::
     {ok, rep_id()} |
+    ignore |
     {temporary_error, binary()} |
     {permanent_failure, binary()}.
 
 
 -record(doc_worker_result, {
     id :: db_doc_id(),
+    wref :: reference(),
     result :: rep_start_result()
 }).

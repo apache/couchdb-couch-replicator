@@ -16,6 +16,7 @@
 -export([start_link/0]).
 -export([docs/1, doc/2]).
 -export([update_docs/0]).
+-export([get_worker_ref/1]).
 
 % multidb changes callback
 -export([db_created/2, db_deleted/2, db_found/2, db_change/3]).
@@ -86,6 +87,18 @@ db_change(DbName, {ChangeProps} = Change, Server) ->
         couch_replicator_docs:update_failed(DbName, DocId, Error, Timestamp)
     end,
     Server.
+
+
+-spec get_worker_ref(db_doc_id()) -> reference() | nil.
+get_worker_ref({DbName, DocId}) when is_binary(DbName), is_binary(DocId) ->
+    case ets:lookup(?MODULE, {DbName, DocId}) of
+        [#rdoc{worker = WRef}] when is_reference(WRef) ->
+            WRef;
+        [#rdoc{worker = nil}] ->
+            nil;
+        [] ->
+            nil
+    end.
 
 
 % Private helpers for multidb changes API, these updates into the doc
@@ -203,8 +216,8 @@ handle_cast(Msg, State) ->
     {stop, {error, unexpected_message, Msg}, State}.
 
 
-handle_info({'DOWN', Ref, _, _, #doc_worker_result{id = Id, result = Res}},
-        State) ->
+handle_info({'DOWN', _, _, _, #doc_worker_result{id = Id, wref = Ref,
+        result = Res}}, State) ->
     ok = worker_returned(Ref, Id, Res),
     {noreply, State};
 
@@ -310,7 +323,7 @@ worker_returned(Ref, Id, {ok, RepId}) ->
                 % for future changes.
                 ok = couch_replicator_scheduler:remove_job(OldRepId),
                 Msg = io_lib:format("Replication id changed: ~p -> ~p", [OldRepId, RepId]),
-                Row0#rdoc{info = couch_util:to_binary(Msg)};
+                Row0#rdoc{rid = RepId, info = couch_util:to_binary(Msg)};
             #rdoc{rid = nil} ->
                 % Calculated new replication id for non-filtered replication. Remove
                 % replication doc body, after this we won't needed any more.
@@ -322,6 +335,9 @@ worker_returned(Ref, Id, {ok, RepId}) ->
     _ ->
         ok  % doc could have been deleted, ignore
     end,
+    ok;
+
+worker_returned(_Ref, _Id, ignore) ->
     ok;
 
 worker_returned(Ref, Id, {temporary_error, Reason}) ->
@@ -413,8 +429,9 @@ maybe_start_worker(Id) ->
         ok;
     [#rdoc{rep = Rep} = Doc] ->
         Wait = get_worker_wait(Doc),
-        WRef = couch_replicator_doc_processor_worker:spawn_worker(Id, Rep, Wait),
-        true = ets:insert(?MODULE, Doc#rdoc{worker = WRef}),
+        Ref = make_ref(),
+        true = ets:insert(?MODULE, Doc#rdoc{worker = Ref}),
+        couch_replicator_doc_processor_worker:spawn_worker(Id, Rep, Wait, Ref),
         ok
     end.
 
@@ -773,6 +790,22 @@ normalize_rep_test_() ->
     }.
 
 
+get_worker_ref_test_() ->
+    {
+        setup,
+        fun() -> ets:new(?MODULE, [named_table, public, {keypos, #rdoc.id}]) end,
+        fun(_) -> ets:delete(?MODULE) end,
+        ?_test(begin
+            Id = {<<"db">>, <<"doc">>},
+            ?assertEqual(nil, get_worker_ref(Id)),
+            ets:insert(?MODULE, #rdoc{id = Id, worker = nil}),
+            ?assertEqual(nil, get_worker_ref(Id)),
+            Ref = make_ref(),
+            ets:insert(?MODULE, #rdoc{id = Id, worker = Ref}),
+            ?assertEqual(Ref, get_worker_ref(Id))
+        end)
+    }.
+
 
 % Test helper functions
 
@@ -786,7 +819,7 @@ setup() ->
     meck:expect(config, listen_for_changes, 2, ok),
     meck:expect(couch_replicator_clustering, owner, 2, node()),
     meck:expect(couch_replicator_clustering, link_cluster_event_listener, 1, ok),
-    meck:expect(couch_replicator_doc_processor_worker, spawn_worker, 3, wref),
+    meck:expect(couch_replicator_doc_processor_worker, spawn_worker, 4, pid),
     meck:expect(couch_replicator_scheduler, remove_job, 1, ok),
     meck:expect(couch_replicator_docs, remove_state_fields, 2, ok),
     meck:expect(couch_replicator_docs, update_failed, 4, ok),
@@ -804,9 +837,8 @@ removed_state_fields() ->
     meck:called(couch_replicator_docs, remove_state_fields, [?DB, ?DOC1]).
 
 
-started_worker(Id) ->
-    meck:called(couch_replicator_doc_processor_worker, spawn_worker,
-        [Id, '_', '_']).
+started_worker(_Id) ->
+    1 == meck:num_calls(couch_replicator_doc_processor_worker, spawn_worker, 4).
 
 
 removed_job(Id) ->
