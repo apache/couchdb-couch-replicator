@@ -14,6 +14,7 @@
 
 -export([parse_rep_doc/2]).
 -export([open_db/1, close_db/1]).
+-export([local_db_name/1]).
 -export([start_db_compaction_notifier/2, stop_db_compaction_notifier/1]).
 -export([replication_id/2]).
 -export([sum_stats/2, is_deleted/1]).
@@ -410,26 +411,33 @@ ssl_verify_options(false, _OTPVersion) ->
 
 
 %% New db record has Options field removed here to enable smoother dbcore migration
-open_db(#db{name = Name, user_ctx = UserCtx}) ->
-    {ok, Db} = couch_db:open(Name, [{user_ctx, UserCtx} | []]),
-    Db;
-open_db(HttpDb) ->
-    HttpDb.
+open_db(#httpdb{} = HttpDb) ->
+    HttpDb;
+open_db(Db) ->
+    DbName = couch_db:name(Db),
+    UserCtx = couch_db:get_user_ctx(Db),
+    {ok, NewDb} = couch_db:open(DbName, [{user_ctx, UserCtx}]),
+    NewDb.
 
+close_db(#httpdb{}) ->
+    ok;
+close_db(Db) ->
+    couch_db:close(Db).
 
-close_db(#db{} = Db) ->
-    couch_db:close(Db);
-close_db(_HttpDb) ->
-    ok.
-
-
-start_db_compaction_notifier(#db{name = DbName}, Server) ->
+start_db_compaction_notifier(#httpdb{}, _) ->
+    nil;
+start_db_compaction_notifier(Db, Server) ->
+    DbName = couch_db:name(Db),
     {ok, Pid} = couch_event:link_listener(
             ?MODULE, handle_db_event, Server, [{dbname, DbName}]
         ),
-    Pid;
-start_db_compaction_notifier(_, _) ->
-    nil.
+    Pid.
+
+
+local_db_name(#httpdb{}) ->
+    undefined;
+local_db_name(Db) ->
+    couch_db:name(Db).
 
 
 stop_db_compaction_notifier(nil) ->

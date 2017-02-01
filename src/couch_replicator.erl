@@ -477,15 +477,21 @@ handle_call({report_seq_done, Seq, StatsInc}, From,
     {noreply, NewState}.
 
 
-handle_cast({db_compacted, DbName},
-    #rep_state{source = #db{name = DbName} = Source} = State) ->
-    {ok, NewSource} = couch_db:reopen(Source),
-    {noreply, State#rep_state{source = NewSource}};
-
-handle_cast({db_compacted, DbName},
-    #rep_state{target = #db{name = DbName} = Target} = State) ->
-    {ok, NewTarget} = couch_db:reopen(Target),
-    {noreply, State#rep_state{target = NewTarget}};
+handle_cast({db_compacted, DbName}, State) ->
+    #rep_state{
+        source = Source,
+        target = Target
+    } = State,
+    SourceName = couch_replicator_utils:local_db_name(Source),
+    TargetName = couch_replicator_utils:local_db_name(Target),
+    case DbName of
+        SourceName ->
+            {ok, NewSource} = couch_db:reopen(Source),
+            {noreply, State#rep_state{source = NewSource}};
+        TargetName ->
+            {ok, NewTarget} = couch_db:reopen(Target),
+            {noreply, State#rep_state{target = NewTarget}}
+    end;
 
 handle_cast(checkpoint, State) ->
     #rep_state{rep_details = #rep{} = Rep} = State,
@@ -968,10 +974,11 @@ has_session_id(SessionId, [{Props} | Rest]) ->
     end.
 
 
-db_monitor(#db{} = Db) ->
-    couch_db:monitor(Db);
-db_monitor(_HttpDb) ->
-    nil.
+db_monitor(#httpdb{}) ->
+    nil;
+db_monitor(Db) ->
+    couch_db:monitor(Db).
+
 
 get_pending_count(St) ->
     Rep = St#rep_state.rep_details,
