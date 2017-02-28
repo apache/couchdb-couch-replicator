@@ -18,6 +18,14 @@
             throw({forbidden: error_msg});
         }
 
+        function validateUrl(endpoint, fieldName) {
+            if ((endpoint.substr(0, 7) !== 'http://') &&
+                 endpoint.substr(0, 8) !== 'https://') {
+                    reportError('The `' + fieldName + '\\' property must be an HTTP' +
+                        ' or HTTPS URL');
+            }
+        }
+
         function validateEndpoint(endpoint, fieldName) {
             if ((typeof endpoint !== 'string') &&
                 ((typeof endpoint !== 'object') || (endpoint === null))) {
@@ -26,10 +34,18 @@
                     ' and be either a string or an object.');
             }
 
+            if (typeof endpoint === 'string') {
+                validateUrl(endpoint, fieldName);
+            }
+
             if (typeof endpoint === 'object') {
                 if ((typeof endpoint.url !== 'string') || !endpoint.url) {
                     reportError('The url property must exist in the `' +
                         fieldName + '\\' field and must be a non-empty string.');
+                }
+
+                if (typeof endpoint.url === 'string') {
+                    validateUrl(endpoint.url, fieldName);
                 }
 
                 if ((typeof endpoint.auth !== 'undefined') &&
