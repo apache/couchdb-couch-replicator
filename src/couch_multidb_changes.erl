@@ -674,15 +674,15 @@ t_misc_gen_server_callbacks() ->
 
 scan_dbs_test_() ->
 {
-      foreach,
-      fun() -> test_util:start_couch([mem3, fabric]) end,
-      fun(Ctx) -> test_util:stop_couch(Ctx) end,
-      [
-          t_pass_shard(),
-          t_fail_shard(),
-          t_pass_local(),
-          t_fail_local()
-     ]
+    foreach,
+    fun() -> test_util:start_couch([mem3, fabric]) end,
+    fun(Ctx) -> test_util:stop_couch(Ctx) end,
+    [
+        t_pass_shard(),
+        t_fail_shard(),
+        t_pass_local(),
+        t_fail_local()
+    ]
 }.
 
 
@@ -722,7 +722,7 @@ t_pass_local() ->
 
 
 t_fail_local() ->
- ?_test(begin
+    ?_test(begin
         LocalDb = ?tempdb(),
         {ok, Db} = couch_db:create(LocalDb, [?CTX]),
         ok = couch_db:close(Db),
