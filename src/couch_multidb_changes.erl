@@ -276,7 +276,12 @@ filter_shards(DbName, DbSuffix) ->
     false ->
         [];
     true ->
-        [ShardName || #shard{name = ShardName} <- mem3:local_shards(DbName)]
+        try
+            [ShardName || #shard{name = ShardName} <- mem3:local_shards(DbName)]
+        catch
+            error:database_does_not_exist ->
+                []
+        end
     end.
 
 
