@@ -147,6 +147,9 @@ ensure_rep_ddoc_exists(RepDb) ->
 -spec ensure_rep_ddoc_exists(binary(), binary()) -> ok.
 ensure_rep_ddoc_exists(RepDb, DDocId) ->
     case open_rep_doc(RepDb, DDocId) of
+        {not_found, no_db_file} ->
+            %% database was deleted.
+            ok;
         {not_found, _Reason} ->
             DocProps = replication_design_doc_props(DDocId),
             DDoc = couch_doc:from_json_obj({DocProps}),
@@ -350,11 +353,15 @@ update_rep_doc(RepDbName, #doc{body = {RepDocBody}} = RepDoc, KVs, _Try) ->
     end.
 
 open_rep_doc(DbName, DocId) ->
-    {ok, Db} = couch_db:open_int(DbName, [?CTX, sys_db]),
-    try
-        couch_db:open_doc(Db, DocId, [ejson_body])
-    after
-        couch_db:close(Db)
+    case couch_db:open_int(DbName, [?CTX, sys_db]) of
+        {ok, Db} ->
+            try
+                couch_db:open_doc(Db, DocId, [ejson_body])
+            after
+                couch_db:close(Db)
+            end;
+        Else ->
+            Else
     end.
 
 save_rep_doc(DbName, Doc) ->
