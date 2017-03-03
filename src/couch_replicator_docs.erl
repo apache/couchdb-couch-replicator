@@ -77,7 +77,8 @@ update_doc_completed(DbName, DocId, Stats, StartTime) ->
 -spec update_failed(binary(), binary(), any(), erlang:timestamp()) -> any().
 update_failed(DbName, DocId, Error, StartTime) ->
     Reason = error_reason(Error),
-    couch_log:error("Error processing replication doc `~s`: ~s", [DocId, Reason]),
+    couch_log:error("Error processing replication doc `~s` from `~s`: ~s",
+        [DocId, DbName, Reason]),
     StartTimeBin = couch_replicator_utils:iso8601(StartTime),
     update_rep_doc(DbName, DocId, [
         {<<"_replication_state">>, <<"failed">>},
