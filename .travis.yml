@@ -33,6 +33,7 @@ before_install:
 before_script:
   - cd couchdb
   - ./configure --disable-docs --disable-fauxton
+  - rm -rf ./src/couch_replicator/*
   - cp -r ../!(couchdb) ./src/couch_replicator
   - make
 
