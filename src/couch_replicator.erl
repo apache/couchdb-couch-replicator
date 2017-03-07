@@ -19,6 +19,7 @@
 
 -include_lib("couch/include/couch_db.hrl").
 -include("couch_replicator.hrl").
+-include("couch_replicator_api_wrap.hrl").
 -include_lib("couch_mrview/include/couch_mrview.hrl").
 
 -define(REPLICATION_STATES, [
@@ -197,13 +198,13 @@ handle_replicator_doc_query({row, Props}, {Db, Cb, UserAcc, States}) ->
     DocStateBin = couch_util:get_value(key, Props),
     DocState = erlang:binary_to_existing_atom(DocStateBin, utf8),
     MapValue = couch_util:get_value(value, Props),
-    {StartTime, StateTime, StateInfo} = case MapValue of
-        [StartT, StateT, Info] ->
-            {StartT, StateT, Info};
+    {Source, Target, StartTime, StateTime, StateInfo} = case MapValue of
+        [Src, Tgt, StartT, StateT, Info] ->
+            {Src, Tgt, StartT, StateT, Info};
         _Other ->
             % Handle the case where the view code was upgraded but new view code
             % wasn't updated yet (before a _scheduler/docs request was made)
-            {null, null, null}
+            {null, null, null, null, null}
     end,
     % Set the error_count to 1 if failed. This is mainly for consistency as
     % jobs from doc_processor and scheduler will have that value set
@@ -214,6 +215,8 @@ handle_replicator_doc_query({row, Props}, {Db, Cb, UserAcc, States}) ->
                 {doc_id, DocId},
                 {database, Db},
                 {id, null},
+                {source, strip_url_creds(Source)},
+                {target, strip_url_creds(Target)},
                 {state, DocState},
                 {error_count, ErrorCount},
                 {info, StateInfo},
@@ -230,6 +233,16 @@ handle_replicator_doc_query({meta, _Meta}, Acc) ->
     {ok, Acc};
 handle_replicator_doc_query(complete, Acc) ->
     {stop, Acc}.
+
+
+-spec strip_url_creds(binary() | {[_]}) -> binary().
+strip_url_creds(Endpoint) ->
+    case couch_replicator_docs:parse_rep_db(Endpoint, [], []) of
+        #httpdb{url=Url} ->
+            iolist_to_binary(couch_util:url_strip_password(Url));
+        LocalDb when is_binary(LocalDb) ->
+            LocalDb
+    end.
 
 
 -spec filter_replicator_doc_query(atom(), [atom()]) -> boolean().
@@ -267,6 +280,8 @@ doc_from_db(RepDb, DocId, UserCtx) ->
     case fabric:open_doc(RepDb, DocId, [UserCtx, ejson_body]) of
         {ok, Doc} ->
             {Props} = couch_doc:to_json_obj(Doc, []),
+            Source = get_value(<<"source">>, Props),
+            Target = get_value(<<"target">>, Props),
             State = get_value(<<"_replication_state">>, Props, null),
             StartTime = get_value(<<"_replication_start_time">>, Props, null),
             StateTime = get_value(<<"_replication_state_time">>, Props, null),
@@ -284,6 +299,8 @@ doc_from_db(RepDb, DocId, UserCtx) ->
                 {doc_id, DocId},
                 {database, RepDb},
                 {id, null},
+                {source, strip_url_creds(Source)},
+                {target, strip_url_creds(Target)},
                 {state, State},
                 {error_count, ErrorCount},
                 {info, StateInfo},
@@ -358,5 +375,42 @@ expect_rep_user_ctx(Name, Role) ->
             UserCtx = #user_ctx{name = Name, roles = [Role]},
             #rep{user_ctx = UserCtx}
         end).
+
+
+strip_url_creds_test_() ->
+     {
+        foreach,
+        fun () -> meck:expect(config, get, fun(_, _, Default) -> Default end) end,
+        fun (_) -> meck:unload() end,
+        [
+            t_strip_local_db_creds(),
+            t_strip_http_basic_creds(),
+            t_strip_http_props_creds()
+        ]
+    }.
+
+
+t_strip_local_db_creds() ->
+    ?_test(?assertEqual(<<"localdb">>, strip_url_creds(<<"localdb">>))).
+
+
+t_strip_http_basic_creds() ->
+    ?_test(begin
+        Url1 = <<"http://adm:pass@host/db">>,
+        ?assertEqual(<<"http://adm:*****@host/db/">>, strip_url_creds(Url1)),
+        Url2 = <<"https://adm:pass@host/db">>,
+        ?assertEqual(<<"https://adm:*****@host/db/">>, strip_url_creds(Url2))
+    end).
+
+
+t_strip_http_props_creds() ->
+    ?_test(begin
+        Props1 = {[{<<"url">>, <<"http://adm:pass@host/db">>}]},
+        ?assertEqual(<<"http://adm:*****@host/db/">>, strip_url_creds(Props1)),
+        Props2 = {[ {<<"url">>, <<"http://host/db">>},
+            {<<"headers">>, {[{<<"Authorization">>, <<"Basic pa55">>}]}}
+        ]},
+        ?assertEqual(<<"http://host/db/">>, strip_url_creds(Props2))
+    end).
 
 -endif.

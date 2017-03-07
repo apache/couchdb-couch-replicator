@@ -12,7 +12,7 @@
 
 -module(couch_replicator_docs).
 
--export([parse_rep_doc/1, parse_rep_doc/2]).
+-export([parse_rep_doc/1, parse_rep_doc/2, parse_rep_db/3]).
 -export([parse_rep_doc_without_id/1, parse_rep_doc_without_id/2]).
 -export([before_doc_update/2, after_doc_read/2]).
 -export([ensure_rep_db_exists/0, ensure_rep_ddoc_exists/1]).
