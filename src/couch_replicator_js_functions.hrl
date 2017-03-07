@@ -176,15 +176,19 @@
     function(doc) {
         state = doc._replication_state;
         if (state === 'failed') {
+            source = doc.source;
+            target = doc.target;
             start_time = doc._replication_start_time;
             last_updated = doc._replication_state_time;
             state_reason = doc._replication_state_reason;
-            emit('failed', [start_time, last_updated, state_reason]);
+            emit('failed', [source, target, start_time, last_updated, state_reason]);
         } else if (state === 'completed') {
+            source = doc.source;
+            target = doc.target;
             start_time = doc._replication_start_time;
             last_updated = doc._replication_state_time;
             stats = doc._replication_stats;
-            emit('completed', [start_time, last_updated, stats]);
+            emit('completed', [source, target, start_time, last_updated, stats]);
         }
     }
 ">>).
