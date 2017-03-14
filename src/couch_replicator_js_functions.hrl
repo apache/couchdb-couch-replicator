@@ -53,18 +53,12 @@
         var isReplicator = (userCtx.roles.indexOf('_replicator') >= 0);
         var isAdmin = (userCtx.roles.indexOf('_admin') >= 0);
 
-        if (newDoc._replication_state === 'error') {
+        if (newDoc._replication_state === 'failed') {
             // Skip validation in case when we update the document with the
             // failed state. In this case it might be malformed. However,
             // replicator will not pay attention to failed documents so this
             // is safe.
             return;
-        }
-
-        if (oldDoc && !newDoc._deleted && !isReplicator &&
-            (oldDoc._replication_state === 'triggered')) {
-            reportError('Only the replicator can edit replication documents ' +
-                'that are in the triggered state.');
         }
 
         if (!newDoc._deleted) {
@@ -173,6 +167,28 @@
                         'admins or by the users who created them.');
                 }
             }
+        }
+    }
+">>).
+
+
+-define(REP_DB_TERMINAL_STATE_VIEW_MAP_FUN, <<"
+    function(doc) {
+        state = doc._replication_state;
+        if (state === 'failed') {
+            source = doc.source;
+            target = doc.target;
+            start_time = doc._replication_start_time;
+            last_updated = doc._replication_state_time;
+            state_reason = doc._replication_state_reason;
+            emit('failed', [source, target, start_time, last_updated, state_reason]);
+        } else if (state === 'completed') {
+            source = doc.source;
+            target = doc.target;
+            start_time = doc._replication_start_time;
+            last_updated = doc._replication_state_time;
+            stats = doc._replication_stats;
+            emit('completed', [source, target, start_time, last_updated, stats]);
         }
     }
 ">>).

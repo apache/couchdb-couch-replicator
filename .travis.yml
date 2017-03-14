@@ -16,9 +16,7 @@
 language: erlang
 
 otp_release:
-  - 18.2
-  - 18.1
-  - 18.0
+  - 18.3
   - 17.5
   - R16B03-1
 
@@ -35,6 +33,7 @@ before_install:
 before_script:
   - cd couchdb
   - ./configure --disable-docs --disable-fauxton
+  - rm -rf ./src/couch_replicator/*
   - cp -r ../!(couchdb) ./src/couch_replicator
   - make
 
@@ -42,3 +41,6 @@ script:
   - make eunit apps=couch_replicator skip_deps=couch_epi,couch_log
 
 cache: apt
+
+notifications:
+  email: false

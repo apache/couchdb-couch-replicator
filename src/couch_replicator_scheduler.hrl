@@ -10,25 +10,6 @@
 % License for the specific language governing permissions and limitations under
 % the License.
 
-{application, couch_replicator, [
-    {description, "CouchDB replicator"},
-    {vsn, git},
-    {mod, {couch_replicator_app, []}},
-    {registered, [
-        couch_replicator_sup,
-        couch_replication,  % couch_replication_event gen_event
-        couch_replicator_clustering,
-        couch_replicator_scheduler,
-        couch_replicator_scheduler_sup
-    ]},
-    {applications, [
-        kernel,
-        stdlib,
-        couch_log,
-        mem3,
-        couch,
-        couch_event,
-        couch_stats
-    ]}
-]}.
 
+-type job_id() :: term().
+-type job_args() :: term().
